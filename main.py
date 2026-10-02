@@ -1,4 +1,3 @@
-
 import json
 import logging
 import os
@@ -28,10 +27,11 @@ UPSTASH_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
 WHATSAPP_API_URL = f"https://graph.facebook.com/v20.0/{PHONE_ID}/messages" if PHONE_ID else None
 
 # Check this against the currently available Gemini models; override with GEN_MODEL.
-GENERATION_MODEL = os.environ.get("GEN_MODEL", "gemini-3.5-flash")
+GENERATION_MODEL = os.environ.get("GEN_MODEL", "gemini-2.5-flash")
 
-HISTORY_TTL_SECONDS = 60 * 60 * 24      # forget a conversation after 24h of silence
-MAX_HISTORY_MESSAGES = 12               # 6 farmer/assistant turns
+# Conversations are stored permanently. Only the most recent messages are sent to
+# Gemini on each turn, to keep latency and token cost bounded.
+CONTEXT_MESSAGES = 20
 WHATSAPP_MAX_CHARS = 4000
 
 if GEN_API:
@@ -96,27 +96,41 @@ def _redis_enabled() -> bool:
     return bool(UPSTASH_URL and UPSTASH_TOKEN)
 
 
+def _history_key(sender: str) -> str:
+    return f"coopiq:chat:{sender}"
+
+
+def _start_with_user(messages: list) -> list:
+    """Gemini requires history to begin with a user turn."""
+    while messages and messages[0].get("role") != "user":
+        messages = messages[1:]
+    return messages
+
+
 def load_history(sender: str) -> list:
-    """Return Gemini-format history: [{"role": "user"|"model", "parts": [text]}, ...]."""
+    """Return the most recent messages in Gemini format:
+    [{"role": "user"|"model", "parts": [text]}, ...]. The full history stays in storage."""
     if _redis_enabled():
         try:
-            raw = _redis("GET", f"coopiq:hist:{sender}")
-            return json.loads(raw) if raw else []
+            raw_items = _redis("LRANGE", _history_key(sender), -CONTEXT_MESSAGES, -1) or []
+            return _start_with_user([json.loads(item) for item in raw_items])
         except Exception:  # noqa: BLE001
             logger.exception("Failed to load history from Redis")
             return []
-    return _local_history.get(sender, [])
+    return _start_with_user(_local_history.get(sender, [])[-CONTEXT_MESSAGES:])
 
 
-def save_history(sender: str, history: list) -> None:
-    history = history[-MAX_HISTORY_MESSAGES:]
+def append_history(sender: str, user_text: str, answer: str) -> None:
+    """Append one farmer/assistant exchange to the permanent history (no expiry)."""
+    user_msg = {"role": "user", "parts": [user_text]}
+    model_msg = {"role": "model", "parts": [answer]}
     if _redis_enabled():
         try:
-            _redis("SET", f"coopiq:hist:{sender}", json.dumps(history), "EX", HISTORY_TTL_SECONDS)
+            _redis("RPUSH", _history_key(sender), json.dumps(user_msg), json.dumps(model_msg))
         except Exception:  # noqa: BLE001
             logger.exception("Failed to save history to Redis")
         return
-    _local_history[sender] = history
+    _local_history.setdefault(sender, []).extend([user_msg, model_msg])
 
 
 def already_processed(message_id: str) -> bool:
@@ -174,9 +188,7 @@ def generate_answer(sender: str, user_text: str, voice_confidence: str = None) -
     answer = response.text.strip()
 
     # Store the plain message, not the injected notes, so history stays small.
-    history.append({"role": "user", "parts": [user_text]})
-    history.append({"role": "model", "parts": [answer]})
-    save_history(sender, history)
+    append_history(sender, user_text, answer)
 
     return answer
 
