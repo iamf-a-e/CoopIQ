@@ -1,24 +1,3 @@
-"""
-main.py
-
-CoopIQ: Flask WhatsApp assistant for poultry farmers.
-
-Gemini handles every message conversationally (same approach as Rudo):
-    - no hard retrieval gate and no canned "not in knowledge base" reply
-    - retrieval from poultry_data.py / embeddings.json is injected as soft
-      reference notes, not as a hard limit on what the model may say
-    - per-farmer conversation history, so follow-up questions work
-    - Gemini matches the language the farmer writes in
-
-Routes:
-    GET  /webhook  -> WhatsApp Cloud API webhook verification
-    POST /webhook  -> incoming WhatsApp messages
-    GET  /         -> health/status page
-
-Optional env vars for conversation memory (falls back to in-process memory,
-which is NOT reliable on Vercel serverless):
-    UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN
-"""
 
 import json
 import logging
