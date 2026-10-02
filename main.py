@@ -1,14 +1,23 @@
 import json
 import logging
 import os
+import sys
+import time
 
 import google.generativeai as genai
 import requests
-from flask import Flask, request, jsonify
+from flask import Flask, g, request, jsonify
+from werkzeug.exceptions import HTTPException
 
 from retrieval import retrieve, format_context
 
-logging.basicConfig(level=logging.INFO)
+# force=True so this config wins even if the host already set up logging.
+logging.basicConfig(
+    level=logging.INFO,
+    stream=sys.stdout,
+    format="%(levelname)s [%(name)s] %(message)s",
+    force=True,
+)
 logger = logging.getLogger("coopiq")
 
 app = Flask(__name__)
@@ -29,6 +38,9 @@ WHATSAPP_API_URL = f"https://graph.facebook.com/v20.0/{PHONE_ID}/messages" if PH
 # Check this against the currently available Gemini models; override with GEN_MODEL.
 GENERATION_MODEL = os.environ.get("GEN_MODEL", "gemini-3.5-flash-lite")
 
+# Set LOG_PAYLOADS=0 once things work: payloads contain farmers' phone numbers and messages.
+LOG_PAYLOADS = os.environ.get("LOG_PAYLOADS", "1") == "1"
+
 # Conversations are stored permanently. Only the most recent messages are sent to
 # Gemini on each turn, to keep latency and token cost bounded.
 CONTEXT_MESSAGES = 20
@@ -36,6 +48,29 @@ WHATSAPP_MAX_CHARS = 4000
 
 if GEN_API:
     genai.configure(api_key=GEN_API)
+
+
+def _set(value) -> str:
+    return "set" if value else "MISSING"
+
+
+def _mask(number) -> str:
+    """Show only the last 4 digits of a phone number in logs."""
+    return f"***{number[-4:]}" if number else "?"
+
+
+# Logged once per cold start. Shows which env vars exist (never their values).
+logger.info(
+    "CoopIQ starting | model=%s | WA_TOKEN=%s PHONE_ID=%s GEN_API=%s VERIFY_TOKEN=%s "
+    "| redis=%s | log_payloads=%s",
+    GENERATION_MODEL,
+    _set(WA_TOKEN),
+    _set(PHONE_ID),
+    _set(GEN_API),
+    _set(VERIFY_TOKEN),
+    "on" if (UPSTASH_URL and UPSTASH_TOKEN) else "off (in-memory fallback)",
+    LOG_PAYLOADS,
+)
 
 SYSTEM_PROMPT = """You are CoopIQ, a friendly, practical WhatsApp assistant for \
 smallholder and commercial poultry farmers in Zambia. You help with broiler, layer, \
@@ -113,11 +148,15 @@ def load_history(sender: str) -> list:
     if _redis_enabled():
         try:
             raw_items = _redis("LRANGE", _history_key(sender), -CONTEXT_MESSAGES, -1) or []
-            return _start_with_user([json.loads(item) for item in raw_items])
+            history = _start_with_user([json.loads(item) for item in raw_items])
+            logger.info("History loaded from Redis: %d messages for %s", len(history), _mask(sender))
+            return history
         except Exception:  # noqa: BLE001
             logger.exception("Failed to load history from Redis")
             return []
-    return _start_with_user(_local_history.get(sender, [])[-CONTEXT_MESSAGES:])
+    history = _start_with_user(_local_history.get(sender, [])[-CONTEXT_MESSAGES:])
+    logger.info("History loaded from memory: %d messages for %s", len(history), _mask(sender))
+    return history
 
 
 def append_history(sender: str, user_text: str, answer: str) -> None:
@@ -127,6 +166,7 @@ def append_history(sender: str, user_text: str, answer: str) -> None:
     if _redis_enabled():
         try:
             _redis("RPUSH", _history_key(sender), json.dumps(user_msg), json.dumps(model_msg))
+            logger.info("History saved to Redis for %s", _mask(sender))
         except Exception:  # noqa: BLE001
             logger.exception("Failed to save history to Redis")
         return
@@ -156,6 +196,7 @@ def already_processed(message_id: str) -> bool:
 # ---------------------------------------------------------------------------
 def generate_answer(sender: str, user_text: str, voice_confidence: str = None) -> str:
     """Let Gemini handle the whole conversation, with retrieved notes as optional context."""
+    started = time.time()
     history = load_history(sender)
 
     # Include the previous farmer message so short follow-ups still retrieve well.
@@ -165,6 +206,7 @@ def generate_answer(sender: str, user_text: str, voice_confidence: str = None) -
     context = ""
     try:
         passages = retrieve(retrieval_query, top_k=4)
+        logger.info("Retrieval returned %d passages", len(passages) if passages else 0)
         if passages:
             context = format_context(passages)
     except Exception:  # noqa: BLE001
@@ -179,6 +221,8 @@ def generate_answer(sender: str, user_text: str, voice_confidence: str = None) -
         )
     turn = f"{notes}\n\n{channel}FARMER'S MESSAGE:\n{user_text}"
 
+    logger.info("Calling Gemini model=%s (prompt ~%d chars)", GENERATION_MODEL, len(turn))
+    gemini_started = time.time()
     model = genai.GenerativeModel(GENERATION_MODEL, system_instruction=SYSTEM_PROMPT)
     chat = model.start_chat(history=history)
     response = chat.send_message(
@@ -186,6 +230,12 @@ def generate_answer(sender: str, user_text: str, voice_confidence: str = None) -
         generation_config={"temperature": 0.4, "max_output_tokens": 700},
     )
     answer = response.text.strip()
+    logger.info(
+        "Gemini replied in %.1fs (%d chars); total generate_answer %.1fs",
+        time.time() - gemini_started,
+        len(answer),
+        time.time() - started,
+    )
 
     # Store the plain message, not the injected notes, so history stays small.
     append_history(sender, user_text, answer)
@@ -198,7 +248,13 @@ def generate_answer(sender: str, user_text: str, voice_confidence: str = None) -
 # ---------------------------------------------------------------------------
 def send_whatsapp_message(to: str, body: str) -> None:
     if not (WA_TOKEN and WHATSAPP_API_URL):
-        logger.warning("WA_TOKEN or PHONE_ID not configured; skipping send. Reply was: %s", body)
+        logger.warning(
+            "WA_TOKEN or PHONE_ID not configured (WA_TOKEN=%s PHONE_ID=%s); skipping send. "
+            "Reply was: %s",
+            _set(WA_TOKEN),
+            _set(PHONE_ID),
+            body,
+        )
         return
 
     headers = {
@@ -211,9 +267,34 @@ def send_whatsapp_message(to: str, body: str) -> None:
         "type": "text",
         "text": {"body": body[:WHATSAPP_MAX_CHARS]},
     }
-    resp = requests.post(WHATSAPP_API_URL, headers=headers, json=payload, timeout=20)
+    logger.info("Sending WhatsApp message to %s (%d chars)", _mask(to), len(body))
+    try:
+        resp = requests.post(WHATSAPP_API_URL, headers=headers, json=payload, timeout=20)
+    except requests.RequestException:
+        logger.exception("WhatsApp send raised a network error")
+        return
+
     if resp.status_code >= 300:
-        logger.error("WhatsApp send failed (%s): %s", resp.status_code, resp.text)
+        try:
+            err = resp.json().get("error", {})
+        except ValueError:
+            err = {}
+        code = err.get("code")
+        logger.error(
+            "WhatsApp send FAILED to=%s http=%s code=%s message=%s | raw=%s",
+            _mask(to), resp.status_code, code, err.get("message"), resp.text[:500],
+        )
+        if code == 190 or resp.status_code == 401:
+            logger.error("HINT: WA_TOKEN is expired or invalid. Temporary tokens last 24 hours.")
+        elif code == 131030:
+            logger.error("HINT: recipient is not on the allowed recipient list (dev mode).")
+        return
+
+    try:
+        wamid = resp.json()["messages"][0]["id"]
+    except (ValueError, KeyError, IndexError):
+        wamid = "?"
+    logger.info("WhatsApp send OK to=%s http=%s wamid=%s", _mask(to), resp.status_code, wamid)
 
 
 def download_whatsapp_media(media_id: str):
@@ -224,6 +305,7 @@ def download_whatsapp_media(media_id: str):
     info = meta.json()
     media = requests.get(info["url"], headers=headers, timeout=30)
     media.raise_for_status()
+    logger.info("Downloaded media %s: %d bytes, mime=%s", media_id, len(media.content), info.get("mime_type"))
     return media.content, info.get("mime_type")
 
 
@@ -283,6 +365,7 @@ def extract_incoming_message(payload: dict):
         sender = message["from"]
         message_id = message.get("id")
         msg_type = message.get("type")
+        logger.info("Parsed message: type=%s from=%s id=%s", msg_type, _mask(sender), message_id)
 
         if msg_type == "text":
             return sender, message_id, message["text"]["body"], None
@@ -295,7 +378,61 @@ def extract_incoming_message(payload: dict):
             return sender, message_id, None, {"id": audio.get("id"), "mime_type": audio.get("mime_type")}
         return sender, message_id, None, None
     except (KeyError, IndexError, TypeError):
+        logger.exception("Could not parse webhook payload")
         return None, None, None, None
+
+
+def log_statuses(payload: dict) -> None:
+    """Log delivery status updates. Failed deliveries include Meta's error codes."""
+    try:
+        for entry in payload.get("entry", []):
+            for change in entry.get("changes", []):
+                for status in change.get("value", {}).get("statuses", []) or []:
+                    errors = status.get("errors")
+                    if errors:
+                        logger.error(
+                            "Delivery status %s for %s: %s",
+                            status.get("status"), _mask(status.get("recipient_id")), errors,
+                        )
+                    else:
+                        logger.info(
+                            "Delivery status %s for %s",
+                            status.get("status"), _mask(status.get("recipient_id")),
+                        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not read status updates")
+
+
+# ---------------------------------------------------------------------------
+# Request / response logging and error handling
+# ---------------------------------------------------------------------------
+@app.before_request
+def log_request():
+    g.started = time.time()
+    forwarded = request.headers.get("X-Forwarded-For", request.remote_addr)
+    logger.info(
+        "REQUEST %s %s from=%s ua=%s content_length=%s",
+        request.method,
+        request.path,
+        forwarded,
+        request.headers.get("User-Agent", "-")[:60],
+        request.content_length,
+    )
+
+
+@app.after_request
+def log_response(response):
+    elapsed_ms = int((time.time() - getattr(g, "started", time.time())) * 1000)
+    logger.info("RESPONSE %s %s -> %s (%d ms)", request.method, request.path, response.status_code, elapsed_ms)
+    return response
+
+
+@app.errorhandler(Exception)
+def log_unhandled(exc):
+    if isinstance(exc, HTTPException):
+        return exc
+    logger.exception("Unhandled exception on %s %s", request.method, request.path)
+    return jsonify({"status": "error"}), 500
 
 
 # ---------------------------------------------------------------------------
@@ -312,29 +449,46 @@ def verify_webhook():
     token = request.args.get("hub.verify_token")
     challenge = request.args.get("hub.challenge")
 
+    logger.info(
+        "Webhook verification: mode=%s token_matches=%s verify_token_configured=%s",
+        mode, token == VERIFY_TOKEN, bool(VERIFY_TOKEN),
+    )
+
     if mode == "subscribe" and token == VERIFY_TOKEN:
+        logger.info("Webhook verification SUCCEEDED")
         return challenge, 200
+    logger.warning("Webhook verification FAILED")
     return "Verification failed", 403
 
 
 @app.route("/webhook", methods=["POST"])
 def handle_webhook():
     payload = request.get_json(silent=True) or {}
-    logger.info("Incoming webhook payload: %s", payload)
+    if not payload:
+        logger.warning("POST /webhook had an empty or non-JSON body")
+    if LOG_PAYLOADS:
+        logger.info("Incoming webhook payload: %s", json.dumps(payload)[:3000])
+    else:
+        logger.info("Incoming webhook payload received (%d bytes)", len(request.get_data() or b""))
 
     sender, message_id, text, audio = extract_incoming_message(payload)
 
     if not sender:
         # Not a user message (e.g. a status update): acknowledge and ignore.
+        logger.info("Ignored: not a user message (status update or unrecognized event)")
+        log_statuses(payload)
         return jsonify({"status": "ignored"}), 200
 
     if already_processed(message_id):
+        logger.info("Ignored duplicate message %s", message_id)
         return jsonify({"status": "duplicate"}), 200
 
     voice_confidence = None
     if audio:
+        logger.info("Voice note received, transcribing")
         text, voice_confidence = transcribe_voice_note(audio)
         if not text:
+            logger.warning("Voice note produced no transcript")
             send_whatsapp_message(
                 sender,
                 "Sorry, I could not hear that voice note clearly. Please record it again "
@@ -343,6 +497,7 @@ def handle_webhook():
             return jsonify({"status": "received"}), 200
 
     if not text:
+        logger.info("Unsupported message type; sending help text")
         send_whatsapp_message(
             sender,
             "I can read text messages and voice notes. Please send your poultry-farming "
@@ -350,10 +505,11 @@ def handle_webhook():
         )
         return jsonify({"status": "received"}), 200
 
+    logger.info("Answering message from %s: %s", _mask(sender), text[:200])
     try:
         answer = generate_answer(sender, text, voice_confidence)
     except Exception:  # noqa: BLE001
-        logger.exception("Error generating answer")
+        logger.exception("Error generating answer (model=%s)", GENERATION_MODEL)
         answer = (
             "Sorry, I ran into a problem answering that just now. "
             "Please try again in a moment."
