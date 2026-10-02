@@ -19,6 +19,7 @@ app = Flask(__name__)
 WA_TOKEN = os.environ.get("WA_TOKEN")
 PHONE_ID = os.environ.get("PHONE_ID")
 GEN_API = os.environ.get("GEN_API")
+VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN")
 
 UPSTASH_URL = os.environ.get("UPSTASH_REDIS_REST_URL")
 UPSTASH_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
