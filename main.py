@@ -28,7 +28,7 @@ UPSTASH_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
 WHATSAPP_API_URL = f"https://graph.facebook.com/v20.0/{PHONE_ID}/messages" if PHONE_ID else None
 
 # Check this against the currently available Gemini models; override with GEN_MODEL.
-GENERATION_MODEL = os.environ.get("GEN_MODEL", "gemini-2.5-flash")
+GENERATION_MODEL = os.environ.get("GEN_MODEL", "gemini-3.5-flash")
 
 HISTORY_TTL_SECONDS = 60 * 60 * 24      # forget a conversation after 24h of silence
 MAX_HISTORY_MESSAGES = 12               # 6 farmer/assistant turns
