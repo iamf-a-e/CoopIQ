@@ -1,18 +1,26 @@
 """
 main.py
 
-CoopIQ is a Flask WhatsApp chatbot that answers poultry-farming questions
-(broiler, layer, village chicken, housing, biosecurity, vaccination,
-feeding, budgeting, marketing, etc.) using retrieval-augmented generation
-(RAG) over the CoopIQ knowledge base (poultry_data.py / embeddings.json)
-and Google's Gemini models.
+CoopIQ: Flask WhatsApp assistant for poultry farmers.
 
-Structure mirrors the Rudo-Test project:
-    - GET  /webhook  -> WhatsApp Cloud API webhook verification
-    - POST /webhook  -> incoming WhatsApp messages
-    - GET  /         -> health/status page
+Gemini handles every message conversationally (same approach as Rudo):
+    - no hard retrieval gate and no canned "not in knowledge base" reply
+    - retrieval from poultry_data.py / embeddings.json is injected as soft
+      reference notes, not as a hard limit on what the model may say
+    - per-farmer conversation history, so follow-up questions work
+    - Gemini matches the language the farmer writes in
+
+Routes:
+    GET  /webhook  -> WhatsApp Cloud API webhook verification
+    POST /webhook  -> incoming WhatsApp messages
+    GET  /         -> health/status page
+
+Optional env vars for conversation memory (falls back to in-process memory,
+which is NOT reliable on Vercel serverless):
+    UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN
 """
 
+import json
 import logging
 import os
 
@@ -35,51 +43,163 @@ PHONE_ID = os.environ.get("PHONE_ID")
 GEN_API = os.environ.get("GEN_API")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "COOPIQ")
 
+UPSTASH_URL = os.environ.get("UPSTASH_REDIS_REST_URL")
+UPSTASH_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
+
 WHATSAPP_API_URL = f"https://graph.facebook.com/v20.0/{PHONE_ID}/messages" if PHONE_ID else None
-GENERATION_MODEL = "models/gemini-1.5-flash"
+
+# Check this against the currently available Gemini models; override with GEN_MODEL.
+GENERATION_MODEL = os.environ.get("GEN_MODEL", "gemini-2.5-flash")
+
+HISTORY_TTL_SECONDS = 60 * 60 * 24      # forget a conversation after 24h of silence
+MAX_HISTORY_MESSAGES = 12               # 6 farmer/assistant turns
+WHATSAPP_MAX_CHARS = 4000
 
 if GEN_API:
     genai.configure(api_key=GEN_API)
 
-SYSTEM_PROMPT = """You are CoopIQ, a friendly, practical WhatsApp assistant that helps \
-smallholder and commercial poultry farmers in Zambia with broiler, layer, and village \
-chicken farming: housing, brooding, feeding, vaccination and disease prevention, \
-biosecurity, budgeting, and marketing.
+SYSTEM_PROMPT = """You are CoopIQ, a friendly, practical WhatsApp assistant for \
+smallholder and commercial poultry farmers in Zambia. You help with broiler, layer, \
+and village chicken farming: housing, brooding, feeding, vaccination and disease \
+prevention, biosecurity, budgeting, and marketing.
 
-Answer ONLY using the CONTEXT provided below. If the context does not contain the \
-answer, say you don't have that information yet and suggest the farmer ask a follow-up \
-question or consult a local veterinary/extension officer -- do not make facts up.
+How to behave:
+- Talk naturally. Handle greetings, thanks, and follow-up questions like a helpful \
+person would. Use the conversation so far to understand what "it", "that", or "how \
+often" refers to.
+- Reply in the same language the farmer writes or speaks in. You support English, \
+Nyanja (Chinyanja), Bemba, Tonga, and Lozi, and farmers often mix these with English \
+words. If they switch language, switch with them. Write simply. If you are not \
+confident you can write correctly in their language, reply in clear simple English and \
+say so briefly instead of guessing.
+- Some messages are voice notes that were transcribed automatically, so the text may \
+contain mishearings, especially of local words. Use the context to work out the most \
+likely meaning. When a message is marked as a voice note with medium or low \
+confidence, begin by briefly saying what you understood, in the farmer's language, so \
+they can correct you.
+- Each message may include REFERENCE NOTES from the CoopIQ knowledge base. Prefer them \
+when they are relevant and keep any numbers in them exact. If the notes do not cover \
+the question, answer from your own general poultry-farming knowledge, and say so \
+briefly when you are less sure.
+- For vaccine schedules, medicine names, dosages, withdrawal periods, and costs, only \
+give specific figures if they appear in the reference notes. Otherwise give general \
+guidance and tell the farmer to confirm with a local veterinary or extension officer.
+- If birds are dying in large numbers or showing severe signs (bloody droppings, \
+gasping, sudden mass deaths), say it is urgent and tell them to contact a vet or the \
+nearest veterinary office right away.
+- If a question is outside poultry farming, answer briefly if it is harmless, then \
+steer back to what you can help with. Never invent facts.
 
-Keep answers short and practical for a WhatsApp chat: plain language, short paragraphs \
-or a few bullet points, no markdown headers. Where the context includes numbers \
-(temperatures, dosages, costs, timelines), keep them exact."""
+Format for WhatsApp: short, plain language, short paragraphs or a few simple bullet \
+points, no markdown headers or tables. Keep replies under about 150 words unless the \
+farmer asks for detail."""
 
 
 # ---------------------------------------------------------------------------
-# RAG answer generation
+# Conversation memory (Upstash Redis via REST, with in-process fallback)
 # ---------------------------------------------------------------------------
-def generate_answer(user_question: str) -> str:
-    """Retrieve relevant passages and ask Gemini to answer using only that context."""
-    passages = retrieve(user_question, top_k=4)
+_local_history = {}
+_local_seen = set()
 
-    if not passages:
-        return (
-            "I don't have information on that yet in the CoopIQ knowledge base. "
-            "Could you rephrase, or ask me about broiler/layer/village chicken farming, "
-            "housing, feeding, vaccination, biosecurity, budgeting, or marketing?"
-        )
 
-    context = format_context(passages)
-    prompt = (
-        f"{SYSTEM_PROMPT}\n\n"
-        f"CONTEXT:\n{context}\n\n"
-        f"FARMER'S QUESTION:\n{user_question}\n\n"
-        f"ANSWER:"
+def _redis(*command):
+    resp = requests.post(
+        UPSTASH_URL,
+        headers={"Authorization": f"Bearer {UPSTASH_TOKEN}"},
+        json=list(command),
+        timeout=5,
     )
+    resp.raise_for_status()
+    return resp.json().get("result")
 
-    model = genai.GenerativeModel(GENERATION_MODEL)
-    response = model.generate_content(prompt)
-    return response.text.strip()
+
+def _redis_enabled() -> bool:
+    return bool(UPSTASH_URL and UPSTASH_TOKEN)
+
+
+def load_history(sender: str) -> list:
+    """Return Gemini-format history: [{"role": "user"|"model", "parts": [text]}, ...]."""
+    if _redis_enabled():
+        try:
+            raw = _redis("GET", f"coopiq:hist:{sender}")
+            return json.loads(raw) if raw else []
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to load history from Redis")
+            return []
+    return _local_history.get(sender, [])
+
+
+def save_history(sender: str, history: list) -> None:
+    history = history[-MAX_HISTORY_MESSAGES:]
+    if _redis_enabled():
+        try:
+            _redis("SET", f"coopiq:hist:{sender}", json.dumps(history), "EX", HISTORY_TTL_SECONDS)
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to save history to Redis")
+        return
+    _local_history[sender] = history
+
+
+def already_processed(message_id: str) -> bool:
+    """WhatsApp retries webhooks that respond slowly, so skip repeated message IDs."""
+    if not message_id:
+        return False
+    if _redis_enabled():
+        try:
+            return _redis("SET", f"coopiq:seen:{message_id}", "1", "NX", "EX", 600) is None
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed dedupe check")
+            return False
+    if message_id in _local_seen:
+        return True
+    if len(_local_seen) > 1000:
+        _local_seen.clear()
+    _local_seen.add(message_id)
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Gemini answer generation
+# ---------------------------------------------------------------------------
+def generate_answer(sender: str, user_text: str, voice_confidence: str = None) -> str:
+    """Let Gemini handle the whole conversation, with retrieved notes as optional context."""
+    history = load_history(sender)
+
+    # Include the previous farmer message so short follow-ups still retrieve well.
+    previous_user = [h["parts"][0] for h in history if h["role"] == "user"][-1:]
+    retrieval_query = " ".join(previous_user + [user_text])
+
+    context = ""
+    try:
+        passages = retrieve(retrieval_query, top_k=4)
+        if passages:
+            context = format_context(passages)
+    except Exception:  # noqa: BLE001
+        logger.exception("Retrieval failed; continuing without reference notes")
+
+    notes = f"REFERENCE NOTES:\n{context}" if context else "(No reference notes matched this message.)"
+    channel = ""
+    if voice_confidence:
+        channel = (
+            "[This message is an automatic transcript of a voice note. "
+            f"Transcription confidence: {voice_confidence}.]\n\n"
+        )
+    turn = f"{notes}\n\n{channel}FARMER'S MESSAGE:\n{user_text}"
+
+    model = genai.GenerativeModel(GENERATION_MODEL, system_instruction=SYSTEM_PROMPT)
+    chat = model.start_chat(history=history)
+    response = chat.send_message(
+        turn,
+        generation_config={"temperature": 0.4, "max_output_tokens": 700},
+    )
+    answer = response.text.strip()
+
+    # Store the plain message, not the injected notes, so history stays small.
+    history.append({"role": "user", "parts": [user_text]})
+    history.append({"role": "model", "parts": [answer]})
+    save_history(sender, history)
+
+    return answer
 
 
 # ---------------------------------------------------------------------------
@@ -98,30 +218,93 @@ def send_whatsapp_message(to: str, body: str) -> None:
         "messaging_product": "whatsapp",
         "to": to,
         "type": "text",
-        "text": {"body": body},
+        "text": {"body": body[:WHATSAPP_MAX_CHARS]},
     }
     resp = requests.post(WHATSAPP_API_URL, headers=headers, json=payload, timeout=20)
     if resp.status_code >= 300:
         logger.error("WhatsApp send failed (%s): %s", resp.status_code, resp.text)
 
 
-def extract_incoming_message(payload: dict):
-    """Pull the sender's number and message text out of a WhatsApp webhook payload."""
+def download_whatsapp_media(media_id: str):
+    """Fetch a WhatsApp media file (e.g. a voice note). Returns (bytes, mime_type)."""
+    headers = {"Authorization": f"Bearer {WA_TOKEN}"}
+    meta = requests.get(f"https://graph.facebook.com/v20.0/{media_id}", headers=headers, timeout=15)
+    meta.raise_for_status()
+    info = meta.json()
+    media = requests.get(info["url"], headers=headers, timeout=30)
+    media.raise_for_status()
+    return media.content, info.get("mime_type")
+
+
+TRANSCRIBE_PROMPT = """You are transcribing a WhatsApp voice note from a farmer in Zambia.
+The speaker may use English, Nyanja (Chinyanja), Bemba, Tonga, or Lozi, and often mixes
+local languages with English words.
+
+Transcribe exactly what is said, in the language it was spoken. Do not translate and do
+not answer the question. Keep code-switching as spoken. If the audio is silent, music
+only, or you cannot make out the words, return an empty transcript.
+
+Rate your confidence honestly: "high" only if the audio was clear and you understood
+every important word, "medium" if some words were uncertain, "low" if you were mostly
+guessing.
+
+Return only JSON: {"transcript": "...", "language": "...", "confidence": "high|medium|low"}"""
+
+
+def transcribe_voice_note(audio: dict):
+    """Return (transcript, confidence) for a WhatsApp voice note, or (None, None) on failure."""
     try:
-        entry = payload["entry"][0]
-        change = entry["changes"][0]
-        value = change["value"]
+        data, media_mime = download_whatsapp_media(audio["id"])
+        mime = (audio.get("mime_type") or media_mime or "audio/ogg").split(";")[0].strip()
+        model = genai.GenerativeModel(GENERATION_MODEL)
+        response = model.generate_content(
+            [TRANSCRIBE_PROMPT, {"mime_type": mime, "data": data}],
+            generation_config={"temperature": 0.0, "response_mime_type": "application/json"},
+        )
+        result = json.loads(response.text)
+        transcript = (result.get("transcript") or "").strip()
+        confidence = str(result.get("confidence", "low")).lower()
+        if confidence not in ("high", "medium", "low"):
+            confidence = "low"
+        logger.info(
+            "Voice note transcribed (language=%s, confidence=%s): %s",
+            result.get("language"), confidence, transcript,
+        )
+        return (transcript or None), confidence
+    except Exception:  # noqa: BLE001
+        logger.exception("Voice note transcription failed")
+        return None, None
+
+
+def extract_incoming_message(payload: dict):
+    """Return (sender, message_id, text, audio) from a WhatsApp webhook payload.
+
+    sender is None for non-message events (e.g. delivery status updates).
+    text is None unless the message is text or a button/list reply.
+    audio is {"id": ..., "mime_type": ...} for voice notes and audio files, else None.
+    """
+    try:
+        value = payload["entry"][0]["changes"][0]["value"]
         messages = value.get("messages")
         if not messages:
-            return None, None
+            return None, None, None, None
         message = messages[0]
         sender = message["from"]
-        if message.get("type") != "text":
-            return sender, None
-        text = message["text"]["body"]
-        return sender, text
+        message_id = message.get("id")
+        msg_type = message.get("type")
+
+        if msg_type == "text":
+            return sender, message_id, message["text"]["body"], None
+        if msg_type == "interactive":
+            interactive = message.get("interactive", {})
+            reply = interactive.get("button_reply") or interactive.get("list_reply") or {}
+            return sender, message_id, reply.get("title"), None
+        if msg_type == "audio":
+            audio = message.get("audio", {})
+            return sender, message_id, None, {"id": audio.get("id"), "mime_type": audio.get("mime_type")}
+        return sender, message_id, None, None
     except (KeyError, IndexError, TypeError):
-        return None, None
+        return None, None, None, None
 
 
 # ---------------------------------------------------------------------------
@@ -148,22 +331,36 @@ def handle_webhook():
     payload = request.get_json(silent=True) or {}
     logger.info("Incoming webhook payload: %s", payload)
 
-    sender, text = extract_incoming_message(payload)
+    sender, message_id, text, audio = extract_incoming_message(payload)
 
     if not sender:
-        # Not a user message (e.g. a status update) -- acknowledge and ignore.
+        # Not a user message (e.g. a status update): acknowledge and ignore.
         return jsonify({"status": "ignored"}), 200
+
+    if already_processed(message_id):
+        return jsonify({"status": "duplicate"}), 200
+
+    voice_confidence = None
+    if audio:
+        text, voice_confidence = transcribe_voice_note(audio)
+        if not text:
+            send_whatsapp_message(
+                sender,
+                "Sorry, I could not hear that voice note clearly. Please record it again "
+                "in a quieter place, or type your question.",
+            )
+            return jsonify({"status": "received"}), 200
 
     if not text:
         send_whatsapp_message(
             sender,
-            "I can currently only read text messages. Please type your poultry-farming "
-            "question and I'll do my best to help!",
+            "I can read text messages and voice notes. Please send your poultry-farming "
+            "question that way and I'll do my best to help!",
         )
         return jsonify({"status": "received"}), 200
 
     try:
-        answer = generate_answer(text)
+        answer = generate_answer(sender, text, voice_confidence)
     except Exception:  # noqa: BLE001
         logger.exception("Error generating answer")
         answer = (
