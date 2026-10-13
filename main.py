@@ -62,6 +62,10 @@ DIAGNOSE_SUBJECTS = ["Poultry droppings", "Poultry bird", "Cattle", "Goat or she
 IMAGE_MIMES = ("image/jpeg", "image/png", "image/webp")
 MAX_CAPTION_CHARS = 600
 
+# Farmers' photos are saved to this private Supabase Storage bucket (see supabase_schema.sql).
+IMAGE_BUCKET = os.environ.get("IMAGE_BUCKET", "farmer-images")
+IMAGE_EXT = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
+
 if GEN_API:
     genai.configure(api_key=GEN_API)
 
@@ -214,6 +218,7 @@ DIAGNOSE_FAILED_REPLY = (
 #   chat_messages      one row per message, kept permanently
 #   processed_messages WhatsApp message IDs already handled (dedupe)
 #   farmers            one row per farmer: first_seen, last_seen, last_language
+#   farmer_images      one row per photo received (file lives in Storage bucket IMAGE_BUCKET)
 # ---------------------------------------------------------------------------
 _local_history = {}
 _local_seen = set()
@@ -224,13 +229,19 @@ def _supabase_enabled() -> bool:
     return bool(SUPABASE_URL and SUPABASE_KEY)
 
 
-def _sb(method: str, table: str, params: dict = None, body=None, prefer: str = None):
-    """Call the Supabase REST API (PostgREST) and return the parsed JSON, or None if empty."""
-    headers = {"apikey": SUPABASE_KEY, "Content-Type": "application/json"}
+def _sb_headers() -> dict:
+    """Auth headers shared by the REST (PostgREST) and Storage calls."""
+    headers = {"apikey": SUPABASE_KEY}
     # Legacy service_role keys are JWTs (start with "eyJ") and go in Authorization too.
     # New sb_secret_... keys are not JWTs and only need the apikey header.
     if SUPABASE_KEY.startswith("eyJ"):
         headers["Authorization"] = f"Bearer {SUPABASE_KEY}"
+    return headers
+
+
+def _sb(method: str, table: str, params: dict = None, body=None, prefer: str = None):
+    """Call the Supabase REST API (PostgREST) and return the parsed JSON, or None if empty."""
+    headers = {**_sb_headers(), "Content-Type": "application/json"}
     if prefer:
         headers["Prefer"] = prefer
     resp = requests.request(
@@ -356,6 +367,62 @@ def already_processed(message_id: str) -> bool:
         _local_seen.clear()
     _local_seen.add(message_id)
     return False
+
+
+def save_image(sender: str, media_id: str, data: bytes, mime: str, caption: str):
+    """Upload the photo to Supabase Storage and insert a farmer_images row.
+
+    Returns the row id, or None if storage is off or anything fails. It never raises,
+    so a storage problem can't stop the photo check from running.
+    """
+    if not _supabase_enabled():
+        return None
+    path = None
+    try:
+        path = f"{sender}/{datetime.now(timezone.utc):%Y-%m}/{media_id}.{IMAGE_EXT[mime]}"
+        headers = {**_sb_headers(), "Content-Type": mime, "x-upsert": "true"}  # upsert: safe on retries
+        resp = requests.post(
+            f"{SUPABASE_URL}/storage/v1/object/{IMAGE_BUCKET}/{path}",
+            headers=headers,
+            data=data,
+            timeout=20,
+        )
+        if resp.status_code >= 300:
+            logger.error("Image upload failed: http=%s body=%s", resp.status_code, resp.text[:300])
+            path = None
+    except Exception:  # noqa: BLE001
+        logger.exception("Image upload raised an error")
+        path = None
+    try:
+        rows = _sb(
+            "POST",
+            "farmer_images",
+            body={
+                "sender": sender,
+                "storage_path": path,
+                "mime_type": mime,
+                "size_bytes": len(data),
+                "caption": caption or None,
+                "whatsapp_media_id": media_id,
+            },
+            prefer="return=representation",
+        )
+        row_id = rows[0]["id"] if rows else None
+        logger.info("Image saved for %s (row=%s, path=%s)", _mask(sender), row_id, path)
+        return row_id
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to save farmer_images row")
+        return None
+
+
+def update_image_result(row_id, **fields) -> None:
+    """Attach the photo-check result (subject, condition, ...) to the saved image row."""
+    if not (row_id and _supabase_enabled()):
+        return
+    try:
+        _sb("PATCH", "farmer_images", params={"id": f"eq.{row_id}"}, body=fields, prefer="return=minimal")
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to update farmer_images row %s", row_id)
 
 
 # ---------------------------------------------------------------------------
@@ -504,6 +571,10 @@ def diagnose_image(sender: str, image: dict) -> str:
         return UNSUPPORTED_IMAGE_REPLY
 
     caption = (image.get("caption") or "").strip()[:MAX_CAPTION_CHARS]
+
+    # Save the photo first, so it is kept even if the diagnosis below fails.
+    image_row_id = save_image(sender, image["id"], data, mime, caption)
+
     history = load_history(sender)
     recent_farmer = [
         h["parts"][0] for h in history
@@ -569,6 +640,16 @@ def diagnose_image(sender: str, image: dict) -> str:
     recommendation = str(result.get("recommendation") or "")[:1200]
     isolate = result.get("isolate") is True
     escalate = result.get("escalate") is True or (conf == "low" and subject != "Other")
+
+    # Attach the result to the saved photo row.
+    update_image_result(
+        image_row_id,
+        subject=subject,
+        condition=condition,
+        confidence=confidence,
+        isolate=isolate,
+        escalate=escalate,
+    )
 
     logger.info(
         "Photo check: subject=%s condition=%s confidence=%s isolate=%s escalate=%s language=%s (%.1fs)",
@@ -864,7 +945,7 @@ def storage_check():
         return f"FAILED {type(exc).__name__}: {exc}"
 
     results = {"supabase_host": SUPABASE_URL.replace("https://", "")}
-    for table in ("chat_messages", "processed_messages", "farmers"):
+    for table in ("chat_messages", "processed_messages", "farmers", "farmer_images"):
         try:
             _sb("GET", table, params={"select": "*", "limit": "1"})
             results[f"read {table}"] = "ok"
@@ -877,6 +958,19 @@ def storage_check():
         results["write farmers"] = "ok"
     except Exception as exc:  # noqa: BLE001
         results["write farmers"] = describe(exc)
+    # Check the image bucket exists and the key can list it.
+    try:
+        resp = requests.post(
+            f"{SUPABASE_URL}/storage/v1/object/list/{IMAGE_BUCKET}",
+            headers={**_sb_headers(), "Content-Type": "application/json"},
+            json={"prefix": "", "limit": 1},
+            timeout=8,
+        )
+        results[f"storage bucket {IMAGE_BUCKET}"] = (
+            "ok" if resp.status_code < 300 else f"FAILED http {resp.status_code}: {resp.text[:300]}"
+        )
+    except Exception as exc:  # noqa: BLE001
+        results[f"storage bucket {IMAGE_BUCKET}"] = describe(exc)
     return jsonify(results)
 
 
@@ -932,7 +1026,7 @@ def handle_webhook():
 
     touch_farmer(sender)
 
-    # Photos: run the disease check and reply.
+    # Photos: save them, run the disease check and reply.
     if image:
         logger.info("Photo received (caption=%s), running photo check", "yes" if image.get("caption") else "no")
         try:
