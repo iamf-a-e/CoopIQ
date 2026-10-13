@@ -42,6 +42,12 @@ GENERATION_MODEL = os.environ.get("GEN_MODEL", "gemini-3.5-flash-lite")
 # Set LOG_PAYLOADS=0 once things work: payloads contain farmers' phone numbers and messages.
 LOG_PAYLOADS = os.environ.get("LOG_PAYLOADS", "1") == "1"
 
+# Optional: run a tiny extra Gemini call to detect the language of each text message
+# before answering, then tell the main prompt explicitly which language to use.
+# Costs one extra call per message. Set DETECT_LANGUAGE=1 to turn it on.
+DETECT_LANGUAGE = os.environ.get("DETECT_LANGUAGE", "0") == "1"
+SUPPORTED_LANGUAGES = ["English", "Nyanja", "Bemba", "Tonga", "Lozi"]
+
 # Conversations are stored permanently. Only the most recent messages are sent to
 # Gemini on each turn, to keep latency and token cost bounded.
 CONTEXT_MESSAGES = 20
@@ -68,7 +74,7 @@ def _mask(number) -> str:
 # Logged once per cold start. Shows which env vars exist (never their values).
 logger.info(
     "CoopIQ starting | model=%s | graph=%s | WA_TOKEN=%s PHONE_ID=%s GEN_API=%s VERIFY_TOKEN=%s "
-    "| redis=%s | log_payloads=%s",
+    "| redis=%s | log_payloads=%s | detect_language=%s",
     GENERATION_MODEL,
     GRAPH_VERSION,
     _set(WA_TOKEN),
@@ -77,15 +83,19 @@ logger.info(
     _set(VERIFY_TOKEN),
     "on" if (UPSTASH_URL and UPSTASH_TOKEN) else "off (in-memory fallback)",
     LOG_PAYLOADS,
+    DETECT_LANGUAGE,
 )
 
 # Shared by the chat prompt and the photo-check prompt so both detect language the same way.
 LANGUAGE_RULE = """Language: work out the language of the farmer's latest message yourself and \
 reply in that same language. You support English, Nyanja (Chinyanja), Bemba, Tonga, and Lozi. \
 Farmers often mix these with English words: reply in the main language they used. If they \
-switch language, switch with them. If the latest message is too short to tell (for example \
-"ok" or "yes"), keep using the language of their earlier messages. If you still cannot tell, \
-or they write in a language you do not support, reply in simple English. Use short, simple \
+switch language, switch with them, even if earlier messages were in a different language. \
+A greeting or short phrase written in a local language (for example "Muli shani", \
+"Muli bwanji", "Mwabuka buti", "Lumela") is a clear signal: reply in that language. \
+Only fall back to the language of earlier messages when the latest message has no language \
+signal at all, such as "ok", "yes", "thanks" or a number. If you still cannot tell, or they \
+write in a language you do not support, reply in simple English. Use short, simple \
 sentences, and keep technical terms such as vaccine, drug, and disease names in English."""
 
 SYSTEM_PROMPT = f"""You are CoopIQ, a friendly, practical WhatsApp assistant for \
@@ -118,10 +128,19 @@ guidance and tell the farmer to confirm with a local veterinary or extension off
 gasping, sudden mass deaths), say it is urgent and tell them to contact a vet or the \
 nearest veterinary office right away.
 - If the farmer's message is only a greeting, thanks, or small talk, reply warmly in one \
-or two short sentences, say you are CoopIQ, and invite them to ask about poultry or \
-livestock health, feeding, or vaccination. For these messages ignore the reference notes.
+or two short sentences WRITTEN IN THE FARMER'S LANGUAGE (follow the language rule above, \
+not English by default), say you are CoopIQ, and invite them to ask about poultry or \
+livestock health, feeding, or vaccination. Translate that invitation into their language \
+too. For these messages ignore the reference notes. Examples of greetings and the \
+language they signal:
+    "Muli shani" -> Bemba: reply in Bemba.
+    "Muli bwanji" or "Zikomo" -> Nyanja: reply in Nyanja.
+    "Mwabuka buti" or "Mwalibizya buti" -> Tonga: reply in Tonga.
+    "Lumela" or "Muzuhile" -> Lozi: reply in Lozi.
+    "Hello" or "Good morning" -> English: reply in English.
 - If a question has nothing to do with farming, say kindly that you can only help with \
-poultry and livestock, and invite a farm question. Never invent facts.
+poultry and livestock, and invite a farm question, in the farmer's language. \
+Never invent facts.
 
 Format for WhatsApp: short, plain language, short paragraphs or a few simple bullet \
 points, no markdown headers or tables. Keep replies under about 150 words unless the \
@@ -260,6 +279,37 @@ def already_processed(message_id: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Language detection (optional, enabled with DETECT_LANGUAGE=1)
+# ---------------------------------------------------------------------------
+def detect_language(text: str):
+    """Return one of SUPPORTED_LANGUAGES for the text, or None if unknown or on failure."""
+    if not text or not text.strip():
+        return None
+    options = ", ".join(SUPPORTED_LANGUAGES + ["Unknown"])
+    prompt = (
+        "Identify the language of this WhatsApp message from a farmer in Zambia. "
+        "Nyanja is also called Chinyanja. Greetings count: 'Muli shani' is Bemba, "
+        "'Muli bwanji' is Nyanja, 'Mwabuka buti' is Tonga, 'Lumela' is Lozi. "
+        "If the message mixes English words with a local language, answer with the local "
+        f"language. Reply with exactly one of: {options}. Reply with nothing else.\n\n"
+        f"Message: {text[:500]}"
+    )
+    try:
+        model = genai.GenerativeModel(GENERATION_MODEL)
+        response = model.generate_content(
+            prompt,
+            generation_config={"temperature": 0.0, "max_output_tokens": 10},
+        )
+        answer = response.text.strip().strip(".").title()
+        language = answer if answer in SUPPORTED_LANGUAGES else None
+        logger.info("Detected language: %s (raw=%r)", language, answer)
+        return language
+    except Exception:  # noqa: BLE001
+        logger.exception("Language detection failed; continuing without it")
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Gemini answer generation
 # ---------------------------------------------------------------------------
 def _retrieve_context(query: str, top_k: int) -> str:
@@ -298,7 +348,21 @@ def generate_answer(
             "[This message is an automatic transcript of a voice note. "
             f"Transcription confidence: {voice_confidence}.{heard}]\n\n"
         )
-    turn = f"{notes}\n\n{channel}FARMER'S MESSAGE:\n{user_text}"
+
+    # The model weighs the latest turn most heavily, so repeat the language instruction
+    # here, right next to the message, instead of relying only on the system prompt.
+    language_note = (
+        "LANGUAGE: Reply in the language of the farmer's message below, even if it is only "
+        "a short greeting and even if earlier messages in this chat were in English. "
+        "The reference notes are in English; do not let that change your reply language."
+    )
+    if DETECT_LANGUAGE:
+        detected = detect_language(user_text)
+        if detected:
+            language_note += f" The message was detected as {detected}: reply in {detected}."
+    language_note += "\n\n"
+
+    turn = f"{notes}\n\n{channel}{language_note}FARMER'S MESSAGE:\n{user_text}"
 
     logger.info("Calling Gemini model=%s (prompt ~%d chars)", GENERATION_MODEL, len(turn))
     gemini_started = time.time()
@@ -374,6 +438,9 @@ def diagnose_image(sender: str, image: dict) -> str:
         f"Farmer's caption: {caption or 'none'}\n"
         "Farmer's recent messages (for language and context only):\n"
         f"{chr(10).join(recent_farmer) if recent_farmer else 'none'}\n\n"
+        "Write the reply field in the language of the caption if there is one, otherwise "
+        "in the language of the recent messages. The reference passages below are in "
+        "English; do not let that change the reply language.\n\n"
         f"REFERENCE:\n{context or '(none)'}"
     )
 
