@@ -3,6 +3,7 @@ import logging
 import os
 import sys
 import time
+from datetime import datetime, timezone
 
 import google.generativeai as genai
 import requests
@@ -30,8 +31,9 @@ PHONE_ID = os.environ.get("PHONE_ID")
 GEN_API = os.environ.get("GEN_API")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN")
 
-UPSTASH_URL = os.environ.get("UPSTASH_REDIS_REST_URL")
-UPSTASH_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
+# Supabase: use the project URL and the SERVICE ROLE key (server-side only, never expose it).
+SUPABASE_URL = (os.environ.get("SUPABASE_URL") or "").rstrip("/")
+SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 
 GRAPH_VERSION = os.environ.get("GRAPH_VERSION", "v21.0")
 GRAPH_URL = f"https://graph.facebook.com/{GRAPH_VERSION}"
@@ -74,14 +76,14 @@ def _mask(number) -> str:
 # Logged once per cold start. Shows which env vars exist (never their values).
 logger.info(
     "CoopIQ starting | model=%s | graph=%s | WA_TOKEN=%s PHONE_ID=%s GEN_API=%s VERIFY_TOKEN=%s "
-    "| redis=%s | log_payloads=%s | detect_language=%s",
+    "| supabase=%s | log_payloads=%s | detect_language=%s",
     GENERATION_MODEL,
     GRAPH_VERSION,
     _set(WA_TOKEN),
     _set(PHONE_ID),
     _set(GEN_API),
     _set(VERIFY_TOKEN),
-    "on" if (UPSTASH_URL and UPSTASH_TOKEN) else "off (in-memory fallback)",
+    "on" if (SUPABASE_URL and SUPABASE_KEY) else "off (in-memory fallback)",
     LOG_PAYLOADS,
     DETECT_LANGUAGE,
 )
@@ -197,29 +199,43 @@ DIAGNOSE_FAILED_REPLY = (
 
 
 # ---------------------------------------------------------------------------
-# Conversation memory (Upstash Redis via REST, with in-process fallback)
+# Storage (Supabase Postgres via the REST API, with in-process fallback)
+#
+# Tables (see supabase_schema.sql):
+#   chat_messages      one row per message, kept permanently
+#   processed_messages WhatsApp message IDs already handled (dedupe)
+#   farmers            one row per farmer: first_seen, last_seen, last_language
 # ---------------------------------------------------------------------------
 _local_history = {}
 _local_seen = set()
+_local_farmers = {}
 
 
-def _redis(*command):
-    resp = requests.post(
-        UPSTASH_URL,
-        headers={"Authorization": f"Bearer {UPSTASH_TOKEN}"},
-        json=list(command),
-        timeout=5,
+def _supabase_enabled() -> bool:
+    return bool(SUPABASE_URL and SUPABASE_KEY)
+
+
+def _sb(method: str, table: str, params: dict = None, body=None, prefer: str = None):
+    """Call the Supabase REST API (PostgREST) and return the parsed JSON, or None if empty."""
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+    }
+    if prefer:
+        headers["Prefer"] = prefer
+    resp = requests.request(
+        method,
+        f"{SUPABASE_URL}/rest/v1/{table}",
+        headers=headers,
+        params=params,
+        json=body,
+        timeout=8,
     )
+    if resp.status_code >= 300:
+        logger.error("Supabase %s %s failed: http=%s body=%s", method, table, resp.status_code, resp.text[:300])
     resp.raise_for_status()
-    return resp.json().get("result")
-
-
-def _redis_enabled() -> bool:
-    return bool(UPSTASH_URL and UPSTASH_TOKEN)
-
-
-def _history_key(sender: str) -> str:
-    return f"coopiq:chat:{sender}"
+    return resp.json() if resp.content else None
 
 
 def _start_with_user(messages: list) -> list:
@@ -232,14 +248,24 @@ def _start_with_user(messages: list) -> list:
 def load_history(sender: str) -> list:
     """Return the most recent messages in Gemini format:
     [{"role": "user"|"model", "parts": [text]}, ...]. The full history stays in storage."""
-    if _redis_enabled():
+    if _supabase_enabled():
         try:
-            raw_items = _redis("LRANGE", _history_key(sender), -CONTEXT_MESSAGES, -1) or []
-            history = _start_with_user([json.loads(item) for item in raw_items])
-            logger.info("History loaded from Redis: %d messages for %s", len(history), _mask(sender))
+            rows = _sb(
+                "GET",
+                "chat_messages",
+                params={
+                    "select": "role,content",
+                    "sender": f"eq.{sender}",
+                    "order": "id.desc",
+                    "limit": str(CONTEXT_MESSAGES),
+                },
+            ) or []
+            rows.reverse()  # newest-first from the query, oldest-first for Gemini
+            history = _start_with_user([{"role": r["role"], "parts": [r["content"]]} for r in rows])
+            logger.info("History loaded from Supabase: %d messages for %s", len(history), _mask(sender))
             return history
         except Exception:  # noqa: BLE001
-            logger.exception("Failed to load history from Redis")
+            logger.exception("Failed to load history from Supabase")
             return []
     history = _start_with_user(_local_history.get(sender, [])[-CONTEXT_MESSAGES:])
     logger.info("History loaded from memory: %d messages for %s", len(history), _mask(sender))
@@ -248,25 +274,70 @@ def load_history(sender: str) -> list:
 
 def append_history(sender: str, user_text: str, answer: str) -> None:
     """Append one farmer/assistant exchange to the permanent history (no expiry)."""
-    user_msg = {"role": "user", "parts": [user_text]}
-    model_msg = {"role": "model", "parts": [answer]}
-    if _redis_enabled():
+    if _supabase_enabled():
         try:
-            _redis("RPUSH", _history_key(sender), json.dumps(user_msg), json.dumps(model_msg))
-            logger.info("History saved to Redis for %s", _mask(sender))
+            _sb(
+                "POST",
+                "chat_messages",
+                body=[
+                    {"sender": sender, "role": "user", "content": user_text},
+                    {"sender": sender, "role": "model", "content": answer},
+                ],
+                prefer="return=minimal",
+            )
+            logger.info("History saved to Supabase for %s", _mask(sender))
         except Exception:  # noqa: BLE001
-            logger.exception("Failed to save history to Redis")
+            logger.exception("Failed to save history to Supabase")
         return
-    _local_history.setdefault(sender, []).extend([user_msg, model_msg])
+    _local_history.setdefault(sender, []).extend(
+        [
+            {"role": "user", "parts": [user_text]},
+            {"role": "model", "parts": [answer]},
+        ]
+    )
+
+
+def touch_farmer(sender: str, language: str = None) -> None:
+    """Create or update the farmer's state row: last_seen, and last_language when known."""
+    now = datetime.now(timezone.utc).isoformat()
+    if _supabase_enabled():
+        row = {"phone": sender, "last_seen": now}
+        if language:
+            row["last_language"] = language  # omitted when unknown so we never overwrite it
+        try:
+            _sb(
+                "POST",
+                "farmers",
+                params={"on_conflict": "phone"},
+                body=row,
+                prefer="resolution=merge-duplicates,return=minimal",
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to update farmer state")
+        return
+    state = _local_farmers.setdefault(sender, {})
+    state["last_seen"] = now
+    if language:
+        state["last_language"] = language
 
 
 def already_processed(message_id: str) -> bool:
-    """WhatsApp retries webhooks that respond slowly, so skip repeated message IDs."""
+    """WhatsApp retries webhooks that respond slowly, so skip repeated message IDs.
+
+    The insert is atomic: if the ID already exists, Postgres ignores it and returns no rows.
+    """
     if not message_id:
         return False
-    if _redis_enabled():
+    if _supabase_enabled():
         try:
-            return _redis("SET", f"coopiq:seen:{message_id}", "1", "NX", "EX", 600) is None
+            rows = _sb(
+                "POST",
+                "processed_messages",
+                params={"on_conflict": "message_id"},
+                body={"message_id": message_id},
+                prefer="resolution=ignore-duplicates,return=representation",
+            )
+            return not rows
         except Exception:  # noqa: BLE001
             logger.exception("Failed dedupe check")
             return False
@@ -359,6 +430,7 @@ def generate_answer(
     if DETECT_LANGUAGE:
         detected = detect_language(user_text)
         if detected:
+            touch_farmer(sender, detected)
             language_note += f" The message was detected as {detected}: reply in {detected}."
     language_note += "\n\n"
 
@@ -440,6 +512,7 @@ def diagnose_image(sender: str, image: dict) -> str:
     # (one tiny extra call) so the decision does not depend on the big prompt.
     caption_language = detect_language(caption) if caption else None
     if caption_language:
+        touch_farmer(sender, caption_language)
         language_instruction = (
             f"LANGUAGE: The farmer's caption is in {caption_language}. Write the reply field "
             f"and the language field in {caption_language}, even if the recent messages "
@@ -812,6 +885,8 @@ def handle_webhook():
     if already_processed(message_id):
         logger.info("Ignored duplicate message %s", message_id)
         return jsonify({"status": "duplicate"}), 200
+
+    touch_farmer(sender)
 
     # Photos: run the disease check and reply.
     if image:
