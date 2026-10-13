@@ -217,11 +217,11 @@ def _supabase_enabled() -> bool:
 
 def _sb(method: str, table: str, params: dict = None, body=None, prefer: str = None):
     """Call the Supabase REST API (PostgREST) and return the parsed JSON, or None if empty."""
-    headers = {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json",
-    }
+    headers = {"apikey": SUPABASE_KEY, "Content-Type": "application/json"}
+    # Legacy service_role keys are JWTs (start with "eyJ") and go in Authorization too.
+    # New sb_secret_... keys are not JWTs and only need the apikey header.
+    if SUPABASE_KEY.startswith("eyJ"):
+        headers["Authorization"] = f"Bearer {SUPABASE_KEY}"
     if prefer:
         headers["Prefer"] = prefer
     resp = requests.request(
