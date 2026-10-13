@@ -32,8 +32,10 @@ GEN_API = os.environ.get("GEN_API")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN")
 
 # Supabase: use the project URL and the SERVICE ROLE key (server-side only, never expose it).
-SUPABASE_URL = (os.environ.get("SUPABASE_URL") or "").rstrip("/")
-SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
+SUPABASE_URL = (os.environ.get("SUPABASE_URL") or "").strip().strip('"').rstrip("/")
+if SUPABASE_URL.endswith("/rest/v1"):  # tolerate a URL pasted with the API path
+    SUPABASE_URL = SUPABASE_URL[: -len("/rest/v1")]
+SUPABASE_KEY = (os.environ.get("SUPABASE_SERVICE_KEY") or "").strip().strip('"') or None
 
 GRAPH_VERSION = os.environ.get("GRAPH_VERSION", "v21.0")
 GRAPH_URL = f"https://graph.facebook.com/{GRAPH_VERSION}"
@@ -87,6 +89,13 @@ logger.info(
     LOG_PAYLOADS,
     DETECT_LANGUAGE,
 )
+
+if not (SUPABASE_URL and SUPABASE_KEY):
+    logger.warning(
+        "SUPABASE_URL=%s SUPABASE_SERVICE_KEY=%s: chats are NOT being saved to the database "
+        "(in-memory fallback only, lost on every restart).",
+        _set(SUPABASE_URL), _set(SUPABASE_KEY),
+    )
 
 # Shared by the chat prompt and the photo-check prompt so both detect language the same way.
 LANGUAGE_RULE = """Language: work out the language of the farmer's latest message yourself and \
@@ -834,6 +843,41 @@ def log_unhandled(exc):
 @app.route("/", methods=["GET"])
 def health():
     return jsonify({"status": "ok", "service": "CoopIQ"})
+
+
+@app.route("/storage-check", methods=["GET"])
+def storage_check():
+    """Diagnose Supabase: open /storage-check?token=<VERIFY_TOKEN> in a browser."""
+    if not VERIFY_TOKEN or request.args.get("token") != VERIFY_TOKEN:
+        return "Forbidden", 403
+    if not _supabase_enabled():
+        return jsonify({
+            "supabase": "NOT CONFIGURED (in-memory fallback in use)",
+            "SUPABASE_URL": _set(SUPABASE_URL),
+            "SUPABASE_SERVICE_KEY": _set(SUPABASE_KEY),
+            "hint": "Add both variables in Vercel and redeploy.",
+        })
+
+    def describe(exc):
+        if isinstance(exc, requests.HTTPError) and exc.response is not None:
+            return f"FAILED http {exc.response.status_code}: {exc.response.text[:300]}"
+        return f"FAILED {type(exc).__name__}: {exc}"
+
+    results = {"supabase_host": SUPABASE_URL.replace("https://", "")}
+    for table in ("chat_messages", "processed_messages", "farmers"):
+        try:
+            _sb("GET", table, params={"select": "*", "limit": "1"})
+            results[f"read {table}"] = "ok"
+        except Exception as exc:  # noqa: BLE001
+            results[f"read {table}"] = describe(exc)
+    try:
+        _sb("POST", "farmers", params={"on_conflict": "phone"},
+            body={"phone": "_storage_check"}, prefer="resolution=merge-duplicates,return=minimal")
+        _sb("DELETE", "farmers", params={"phone": "eq._storage_check"}, prefer="return=minimal")
+        results["write farmers"] = "ok"
+    except Exception as exc:  # noqa: BLE001
+        results["write farmers"] = describe(exc)
+    return jsonify(results)
 
 
 @app.route("/webhook", methods=["GET"])
