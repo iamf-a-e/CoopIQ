@@ -33,7 +33,8 @@ VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN")
 UPSTASH_URL = os.environ.get("UPSTASH_REDIS_REST_URL")
 UPSTASH_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
 
-WHATSAPP_API_URL = f"https://graph.facebook.com/v20.0/{PHONE_ID}/messages" if PHONE_ID else None
+GRAPH_VERSION = os.environ.get("GRAPH_VERSION", "v21.0")
+GRAPH_URL = f"https://graph.facebook.com/{GRAPH_VERSION}"
 
 # Check this against the currently available Gemini models; override with GEN_MODEL.
 GENERATION_MODEL = os.environ.get("GEN_MODEL", "gemini-3.5-flash-lite")
@@ -61,9 +62,10 @@ def _mask(number) -> str:
 
 # Logged once per cold start. Shows which env vars exist (never their values).
 logger.info(
-    "CoopIQ starting | model=%s | WA_TOKEN=%s PHONE_ID=%s GEN_API=%s VERIFY_TOKEN=%s "
+    "CoopIQ starting | model=%s | graph=%s | WA_TOKEN=%s PHONE_ID=%s GEN_API=%s VERIFY_TOKEN=%s "
     "| redis=%s | log_payloads=%s",
     GENERATION_MODEL,
+    GRAPH_VERSION,
     _set(WA_TOKEN),
     _set(PHONE_ID),
     _set(GEN_API),
@@ -246,17 +248,25 @@ def generate_answer(sender: str, user_text: str, voice_confidence: str = None) -
 # ---------------------------------------------------------------------------
 # WhatsApp Cloud API helpers
 # ---------------------------------------------------------------------------
-def send_whatsapp_message(to: str, body: str) -> None:
-    if not (WA_TOKEN and WHATSAPP_API_URL):
+def send_whatsapp_message(to: str, body: str, phone_number_id: str = None) -> None:
+    """Send a text message.
+
+    Replies go out from `phone_number_id` (the number that RECEIVED the message) when
+    given, falling back to the PHONE_ID env var. This guarantees the reply appears in
+    the same chat the farmer wrote in, even if PHONE_ID is misconfigured.
+    """
+    sender_id = phone_number_id or PHONE_ID
+    if not (WA_TOKEN and sender_id):
         logger.warning(
-            "WA_TOKEN or PHONE_ID not configured (WA_TOKEN=%s PHONE_ID=%s); skipping send. "
-            "Reply was: %s",
+            "WA_TOKEN or phone number ID not configured (WA_TOKEN=%s sender_id=%s); "
+            "skipping send. Reply was: %s",
             _set(WA_TOKEN),
-            _set(PHONE_ID),
+            _set(sender_id),
             body,
         )
         return
 
+    url = f"{GRAPH_URL}/{sender_id}/messages"
     headers = {
         "Authorization": f"Bearer {WA_TOKEN}",
         "Content-Type": "application/json",
@@ -267,9 +277,12 @@ def send_whatsapp_message(to: str, body: str) -> None:
         "type": "text",
         "text": {"body": body[:WHATSAPP_MAX_CHARS]},
     }
-    logger.info("Sending WhatsApp message to %s (%d chars)", _mask(to), len(body))
+    logger.info(
+        "Sending WhatsApp message to %s from phone_number_id=%s (%d chars)",
+        _mask(to), sender_id, len(body),
+    )
     try:
-        resp = requests.post(WHATSAPP_API_URL, headers=headers, json=payload, timeout=20)
+        resp = requests.post(url, headers=headers, json=payload, timeout=20)
     except requests.RequestException:
         logger.exception("WhatsApp send raised a network error")
         return
@@ -288,19 +301,33 @@ def send_whatsapp_message(to: str, body: str) -> None:
             logger.error("HINT: WA_TOKEN is expired or invalid. Temporary tokens last 24 hours.")
         elif code == 131030:
             logger.error("HINT: recipient is not on the allowed recipient list (dev mode).")
+        elif code == 100:
+            logger.error(
+                "HINT: the phone number ID (%s) does not exist or the token cannot access it. "
+                "Dashboard 'Test' events use a dummy ID, so this is expected for those.",
+                sender_id,
+            )
         return
 
     try:
-        wamid = resp.json()["messages"][0]["id"]
+        data = resp.json()
+        wamid = data["messages"][0]["id"]
+        msg_status = data["messages"][0].get("message_status")
     except (ValueError, KeyError, IndexError):
-        wamid = "?"
-    logger.info("WhatsApp send OK to=%s http=%s wamid=%s", _mask(to), resp.status_code, wamid)
+        wamid, msg_status = "?", None
+    logger.info(
+        "WhatsApp send accepted to=%s http=%s wamid=%s message_status=%s "
+        "(delivery result follows as a 'Delivery status' log line)",
+        _mask(to), resp.status_code, wamid, msg_status,
+    )
+    if LOG_PAYLOADS:
+        logger.info("WhatsApp send response: %s", resp.text[:500])
 
 
 def download_whatsapp_media(media_id: str):
     """Fetch a WhatsApp media file (e.g. a voice note). Returns (bytes, mime_type)."""
     headers = {"Authorization": f"Bearer {WA_TOKEN}"}
-    meta = requests.get(f"https://graph.facebook.com/v20.0/{media_id}", headers=headers, timeout=15)
+    meta = requests.get(f"{GRAPH_URL}/{media_id}", headers=headers, timeout=15)
     meta.raise_for_status()
     info = meta.json()
     media = requests.get(info["url"], headers=headers, timeout=30)
@@ -349,6 +376,14 @@ def transcribe_voice_note(audio: dict):
         return None, None
 
 
+def extract_phone_number_id(payload: dict):
+    """Return the ID of the WhatsApp number that received the event, or None."""
+    try:
+        return payload["entry"][0]["changes"][0]["value"]["metadata"].get("phone_number_id")
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return None
+
+
 def extract_incoming_message(payload: dict):
     """Return (sender, message_id, text, audio) from a WhatsApp webhook payload.
 
@@ -382,8 +417,17 @@ def extract_incoming_message(payload: dict):
         return None, None, None, None
 
 
+STATUS_HINTS = {
+    131030: "recipient is not on the allowed recipient list (add the number under API Setup > To).",
+    131047: "24-hour customer-service window is closed; only template messages can be sent.",
+    131026: "message could not be delivered to this number (not on WhatsApp, or blocked).",
+    131053: "media could not be downloaded or uploaded.",
+    190: "access token is invalid or expired.",
+}
+
+
 def log_statuses(payload: dict) -> None:
-    """Log delivery status updates. Failed deliveries include Meta's error codes."""
+    """Log delivery status updates (sent / delivered / read / failed) with Meta's error codes."""
     try:
         for entry in payload.get("entry", []):
             for change in entry.get("changes", []):
@@ -391,13 +435,19 @@ def log_statuses(payload: dict) -> None:
                     errors = status.get("errors")
                     if errors:
                         logger.error(
-                            "Delivery status %s for %s: %s",
-                            status.get("status"), _mask(status.get("recipient_id")), errors,
+                            "Delivery status %s for %s (wamid=%s): %s",
+                            status.get("status"), _mask(status.get("recipient_id")),
+                            status.get("id"), errors,
                         )
+                        for err in errors:
+                            hint = STATUS_HINTS.get(err.get("code"))
+                            if hint:
+                                logger.error("HINT (%s): %s", err.get("code"), hint)
                     else:
                         logger.info(
-                            "Delivery status %s for %s",
+                            "Delivery status %s for %s (wamid=%s)",
                             status.get("status"), _mask(status.get("recipient_id")),
+                            status.get("id"),
                         )
     except Exception:  # noqa: BLE001
         logger.exception("Could not read status updates")
@@ -479,6 +529,16 @@ def handle_webhook():
         log_statuses(payload)
         return jsonify({"status": "ignored"}), 200
 
+    # Reply from the number that received the message.
+    receiving_id = extract_phone_number_id(payload)
+    if receiving_id and PHONE_ID and receiving_id != PHONE_ID:
+        logger.warning(
+            "PHONE_ID env var (%s) differs from the number that received this message (%s). "
+            "Replying from the receiving number. Update PHONE_ID in Vercel to fix this.",
+            PHONE_ID, receiving_id,
+        )
+    reply_from = receiving_id or PHONE_ID
+
     if already_processed(message_id):
         logger.info("Ignored duplicate message %s", message_id)
         return jsonify({"status": "duplicate"}), 200
@@ -493,6 +553,7 @@ def handle_webhook():
                 sender,
                 "Sorry, I could not hear that voice note clearly. Please record it again "
                 "in a quieter place, or type your question.",
+                reply_from,
             )
             return jsonify({"status": "received"}), 200
 
@@ -502,6 +563,7 @@ def handle_webhook():
             sender,
             "I can read text messages and voice notes. Please send your poultry-farming "
             "question that way and I'll do my best to help!",
+            reply_from,
         )
         return jsonify({"status": "received"}), 200
 
@@ -515,7 +577,7 @@ def handle_webhook():
             "Please try again in a moment."
         )
 
-    send_whatsapp_message(sender, answer)
+    send_whatsapp_message(sender, answer, reply_from)
     return jsonify({"status": "received"}), 200
 
 
