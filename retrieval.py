@@ -11,17 +11,29 @@ the query embedding and each cached document embedding.
 Kept dependency-light (no faiss/annoy) since the knowledge base is small
 (~100 passages) -- a brute-force numpy cosine search is fast enough and
 simple enough to run inside a serverless function.
+
+IMPORTANT: EMBEDDING_MODEL and EMBEDDING_DIM here must match
+build_embeddings.py, and embeddings.json must be rebuilt after any change.
 """
 
 import json
+import logging
 import os
 from typing import Dict, List
 
 import numpy as np
 import google.generativeai as genai
 
-EMBEDDING_MODEL = "models/text-embedding-004"
+logger = logging.getLogger("coopiq")
+
+EMBEDDING_MODEL = "models/gemini-embedding-001"
+EMBEDDING_DIM = 768  # must match build_embeddings.py
 EMBEDDINGS_PATH = os.path.join(os.path.dirname(__file__), "embeddings.json")
+
+# Score thresholds differ between embedding models. While tuning min_score,
+# keep this on to log the top similarity scores for each query; then set
+# RETRIEVAL_DEBUG=0 (or delete the log line) once you've settled on a value.
+RETRIEVAL_DEBUG = os.environ.get("RETRIEVAL_DEBUG", "1") == "1"
 
 _cache: Dict[str, np.ndarray] = {}
 _records: List[dict] = []
@@ -52,6 +64,7 @@ def embed_query(text: str) -> np.ndarray:
         model=EMBEDDING_MODEL,
         content=text,
         task_type="RETRIEVAL_QUERY",
+        output_dimensionality=EMBEDDING_DIM,
     )
     vec = np.array(result["embedding"], dtype=np.float32)
     norm = np.linalg.norm(vec)
@@ -67,11 +80,24 @@ def retrieve(query: str, top_k: int = 4, min_score: float = 0.55) -> List[dict]:
     Each returned dict has: id, text, source, section, topic, score.
     Passages scoring below `min_score` (cosine similarity, 0-1) are dropped
     so that off-topic questions don't get force-fed irrelevant context.
+
+    NOTE: 0.55 was tuned for text-embedding-004. Re-tune it for
+    gemini-embedding-001 using the RETRIEVAL_DEBUG score log.
     """
     _load_embeddings()
 
     query_vec = embed_query(query)
+
+    if query_vec.shape[0] != _cache["normalized"].shape[1]:
+        raise ValueError(
+            f"Embedding dimension mismatch: query={query_vec.shape[0]}, "
+            f"index={_cache['normalized'].shape[1]}. Rebuild embeddings.json."
+        )
+
     scores = _cache["normalized"] @ query_vec  # cosine similarity, since both sides are unit vectors
+
+    if RETRIEVAL_DEBUG:
+        logger.info("Retrieval top scores: %s", np.sort(scores)[::-1][:5].round(3).tolist())
 
     top_indices = np.argsort(scores)[::-1][:top_k]
 
