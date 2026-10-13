@@ -424,7 +424,10 @@ def diagnose_image(sender: str, image: dict) -> str:
 
     caption = (image.get("caption") or "").strip()[:MAX_CAPTION_CHARS]
     history = load_history(sender)
-    recent_farmer = [h["parts"][0] for h in history if h.get("role") == "user"][-2:]
+    recent_farmer = [
+        h["parts"][0] for h in history
+        if h.get("role") == "user" and not h["parts"][0].startswith("[Photo of")
+    ][-2:]
 
     # The subject is not known until the model has seen the photo, so retrieve broadly
     # using the caption and recent messages plus generic disease terms.
@@ -433,14 +436,30 @@ def diagnose_image(sender: str, image: dict) -> str:
     )
     context = _retrieve_context(retrieval_query, top_k=6)
 
+    # The caption is the strongest language signal for a photo. Detect it explicitly
+    # (one tiny extra call) so the decision does not depend on the big prompt.
+    caption_language = detect_language(caption) if caption else None
+    if caption_language:
+        language_instruction = (
+            f"LANGUAGE: The farmer's caption is in {caption_language}. Write the reply field "
+            f"and the language field in {caption_language}, even if the recent messages "
+            "below are in a different language."
+        )
+        recent_label = "Farmer's recent messages (context only, NOT a language signal):"
+    else:
+        language_instruction = (
+            "LANGUAGE: There is no usable caption. Write the reply field in the language "
+            "of the farmer's recent messages below, or in English if there are none."
+        )
+        recent_label = "Farmer's recent messages (use for language and context):"
+
     prompt = (
         f"{DIAGNOSE_INSTRUCTIONS}\n\n"
         f"Farmer's caption: {caption or 'none'}\n"
-        "Farmer's recent messages (for language and context only):\n"
+        f"{recent_label}\n"
         f"{chr(10).join(recent_farmer) if recent_farmer else 'none'}\n\n"
-        "Write the reply field in the language of the caption if there is one, otherwise "
-        "in the language of the recent messages. The reference passages below are in "
-        "English; do not let that change the reply language.\n\n"
+        f"{language_instruction} The reference passages below are in English; do not "
+        "let that change the reply language.\n\n"
         f"REFERENCE:\n{context or '(none)'}"
     )
 
