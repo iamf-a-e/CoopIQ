@@ -9,8 +9,8 @@ poultry_data.py changes) so that the live webhook in main.py never has to
 call the embeddings API on the hot path -- it just loads embeddings.json and
 does an in-memory cosine-similarity search.
 
-Usage:
-    $env:GEN_API="your-gemini-api-key"
+Usage (macOS / Linux, zsh or bash):
+    export GEN_API="your-key-here"
     python build_embeddings.py
 
 Output:
@@ -18,6 +18,8 @@ Output:
         {"id": ..., "text": ..., "source": ..., "section": ...,
          "topic": ..., "embedding": [float, ...]}
     aligned 1:1 with POULTRY_KNOWLEDGE_BASE, in the same order.
+
+IMPORTANT: EMBEDDING_MODEL and EMBEDDING_DIM here must match retrieval.py.
 """
 
 import json
@@ -25,16 +27,18 @@ import os
 import sys
 import time
 
+import numpy as np
 import google.generativeai as genai
+from google.api_core import exceptions as gexc
 
 from poultry_data import POULTRY_KNOWLEDGE_BASE
 
-EMBEDDING_MODEL = "models/text-embedding-004"
+EMBEDDING_MODEL = "models/gemini-embedding-001"
+EMBEDDING_DIM = 768  # must match retrieval.py
 OUTPUT_PATH = os.path.join(os.path.dirname(__file__), "embeddings.json")
 
-# Gemini's embed_content endpoint accepts a limited number of texts at once
-# when using batch mode; embedding one at a time is simpler and reliable
-# for a knowledge base of this size (~100 docs).
+# Embedding one passage at a time is simple and reliable for a knowledge
+# base of this size (~100 docs).
 RETRY_ATTEMPTS = 3
 RETRY_DELAY_SECONDS = 2
 
@@ -48,12 +52,21 @@ def embed_text(text: str, task_type: str = "RETRIEVAL_DOCUMENT") -> list:
                 model=EMBEDDING_MODEL,
                 content=text,
                 task_type=task_type,
+                output_dimensionality=EMBEDDING_DIM,
             )
-            return result["embedding"]
-        except Exception as exc:  # noqa: BLE001 - want to retry on anything
+            # Vectors below 3072 dims aren't unit-length, so normalize.
+            v = np.array(result["embedding"], dtype=np.float32)
+            norm = np.linalg.norm(v)
+            if norm > 0:
+                v = v / norm
+            return v.tolist()
+        except gexc.NotFound:
+            # Wrong or retired model name: retrying won't help.
+            raise
+        except Exception as exc:  # noqa: BLE001 - want to retry on anything else
             last_error = exc
             print(f"  attempt {attempt} failed: {exc}", file=sys.stderr)
-            time.sleep(RETRY_DELAY_SECONDS)
+            time.sleep(RETRY_DELAY_SECONDS * attempt)  # simple backoff for 429s
     raise RuntimeError(f"Failed to embed text after {RETRY_ATTEMPTS} attempts") from last_error
 
 
@@ -65,7 +78,10 @@ def main() -> None:
 
     genai.configure(api_key=api_key)
 
-    print(f"Embedding {len(POULTRY_KNOWLEDGE_BASE)} passages with {EMBEDDING_MODEL} ...")
+    print(
+        f"Embedding {len(POULTRY_KNOWLEDGE_BASE)} passages with "
+        f"{EMBEDDING_MODEL} ({EMBEDDING_DIM} dims) ..."
+    )
     records = []
     for i, doc in enumerate(POULTRY_KNOWLEDGE_BASE, start=1):
         embedding = embed_text(doc["text"], task_type="RETRIEVAL_DOCUMENT")
