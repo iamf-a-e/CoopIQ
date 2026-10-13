@@ -1,9 +1,10 @@
 import json
 import logging
 import os
+import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import google.generativeai as genai
 import requests
@@ -56,6 +57,9 @@ SUPPORTED_LANGUAGES = ["English", "Nyanja", "Bemba", "Tonga", "Lozi"]
 # Gemini on each turn, to keep latency and token cost bounded.
 CONTEXT_MESSAGES = 20
 WHATSAPP_MAX_CHARS = 4000
+
+# If the farmer messaged us within this many hours, the bot does not greet or introduce itself.
+GREETING_COOLDOWN_HOURS = float(os.environ.get("GREETING_COOLDOWN_HOURS", "24"))
 
 # Photo check (same subjects and image types as the CoopIQ Supabase edge function).
 DIAGNOSE_SUBJECTS = ["Poultry droppings", "Poultry bird", "Cattle", "Goat or sheep", "Pig"]
@@ -341,6 +345,45 @@ def touch_farmer(sender: str, language: str = None) -> None:
         state["last_language"] = language
 
 
+def _parse_ts(value):
+    """Parse a Postgres/ISO timestamp into an aware datetime, or None if it can't be read."""
+    if not value:
+        return None
+    try:
+        s = str(value).strip().replace("Z", "+00:00")
+        # Older Pythons need exactly 6 fractional digits; Postgres may return fewer.
+        s = re.sub(r"\.(\d+)", lambda m: "." + m.group(1)[:6].ljust(6, "0"), s, count=1)
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except ValueError:
+        return None
+
+
+def get_last_seen(sender: str):
+    """When the farmer last messaged us (before this message), or None if never."""
+    if _supabase_enabled():
+        try:
+            rows = _sb(
+                "GET",
+                "farmers",
+                params={"select": "last_seen", "phone": f"eq.{sender}", "limit": "1"},
+            ) or []
+            return _parse_ts(rows[0].get("last_seen")) if rows else None
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to read last_seen")
+            return None
+    return _parse_ts(_local_farmers.get(sender, {}).get("last_seen"))
+
+
+def chatted_recently(last_seen) -> bool:
+    """True if the farmer messaged us within GREETING_COOLDOWN_HOURS."""
+    if not last_seen:
+        return False
+    return datetime.now(timezone.utc) - last_seen < timedelta(hours=GREETING_COOLDOWN_HOURS)
+
+
 def already_processed(message_id: str) -> bool:
     """WhatsApp retries webhooks that respond slowly, so skip repeated message IDs.
 
@@ -476,6 +519,7 @@ def generate_answer(
     user_text: str,
     voice_confidence: str = None,
     voice_language: str = None,
+    recently_chatted: bool = False,
 ) -> str:
     """Let Gemini handle the whole conversation, with retrieved notes as optional context."""
     started = time.time()
@@ -508,6 +552,16 @@ def generate_answer(
         if detected:
             touch_farmer(sender, detected)
             language_note += f" The message was detected as {detected}: reply in {detected}."
+    if recently_chatted:
+        # Overrides the greeting rules in the system prompt for this turn.
+        language_note += (
+            "\n\nGREETING: This farmer already chatted with you in the last 24 hours. Do NOT "
+            "greet them and do NOT introduce yourself: no \"Hello\", \"Hi\", \"Good morning\", "
+            "no greeting in any local language, and no \"I am CoopIQ\". Start directly with the "
+            "answer. If their message is only a greeting or small talk, reply in one short "
+            "sentence in their language and invite their next question, without introducing "
+            "yourself again."
+        )
     language_note += "\n\n"
 
     turn = f"{notes}\n\n{channel}{language_note}FARMER'S MESSAGE:\n{user_text}"
@@ -1024,6 +1078,8 @@ def handle_webhook():
         logger.info("Ignored duplicate message %s", message_id)
         return jsonify({"status": "duplicate"}), 200
 
+    # Read the previous last_seen BEFORE touch_farmer overwrites it with now.
+    recently_chatted = chatted_recently(get_last_seen(sender))
     touch_farmer(sender)
 
     # Photos: save them, run the disease check and reply.
@@ -1065,7 +1121,9 @@ def handle_webhook():
 
     logger.info("Answering message from %s: %s", _mask(sender), text[:200])
     try:
-        answer = generate_answer(sender, text, voice_confidence, voice_language)
+        answer = generate_answer(
+            sender, text, voice_confidence, voice_language, recently_chatted=recently_chatted
+        )
     except Exception:  # noqa: BLE001
         logger.exception("Error generating answer (model=%s)", GENERATION_MODEL)
         answer = (
