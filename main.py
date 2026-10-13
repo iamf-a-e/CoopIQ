@@ -47,6 +47,11 @@ LOG_PAYLOADS = os.environ.get("LOG_PAYLOADS", "1") == "1"
 CONTEXT_MESSAGES = 20
 WHATSAPP_MAX_CHARS = 4000
 
+# Photo check (same subjects and image types as the CoopIQ Supabase edge function).
+DIAGNOSE_SUBJECTS = ["Poultry droppings", "Poultry bird", "Cattle", "Goat or sheep", "Pig"]
+IMAGE_MIMES = ("image/jpeg", "image/png", "image/webp")
+MAX_CAPTION_CHARS = 600
+
 if GEN_API:
     genai.configure(api_key=GEN_API)
 
@@ -74,28 +79,37 @@ logger.info(
     LOG_PAYLOADS,
 )
 
-SYSTEM_PROMPT = """You are CoopIQ, a friendly, practical WhatsApp assistant for \
+# Shared by the chat prompt and the photo-check prompt so both detect language the same way.
+LANGUAGE_RULE = """Language: work out the language of the farmer's latest message yourself and \
+reply in that same language. You support English, Nyanja (Chinyanja), Bemba, Tonga, and Lozi. \
+Farmers often mix these with English words: reply in the main language they used. If they \
+switch language, switch with them. If the latest message is too short to tell (for example \
+"ok" or "yes"), keep using the language of their earlier messages. If you still cannot tell, \
+or they write in a language you do not support, reply in simple English. Use short, simple \
+sentences, and keep technical terms such as vaccine, drug, and disease names in English."""
+
+SYSTEM_PROMPT = f"""You are CoopIQ, a friendly, practical WhatsApp assistant for \
 smallholder and commercial poultry farmers in Zambia. You help with broiler, layer, \
 and village chicken farming: housing, brooding, feeding, vaccination and disease \
-prevention, biosecurity, budgeting, and marketing.
+prevention, biosecurity, budgeting, and marketing. You can also answer basic health \
+and feeding questions about cattle, goats, sheep, and pigs.
 
 How to behave:
 - Talk naturally. Handle greetings, thanks, and follow-up questions like a helpful \
 person would. Use the conversation so far to understand what "it", "that", or "how \
 often" refers to.
-- Reply in the same language the farmer writes or speaks in. You support English, \
-Nyanja (Chinyanja), Bemba, Tonga, and Lozi, and farmers often mix these with English \
-words. If they switch language, switch with them. Write simply. If you are not \
-confident you can write correctly in their language, reply in clear simple English and \
-say so briefly instead of guessing.
+- {LANGUAGE_RULE}
 - Some messages are voice notes that were transcribed automatically, so the text may \
 contain mishearings, especially of local words. Use the context to work out the most \
-likely meaning. When a message is marked as a voice note with medium or low \
-confidence, begin by briefly saying what you understood, in the farmer's language, so \
-they can correct you.
+likely meaning. A voice note may be marked with the language heard in the audio: treat \
+that as a hint, and trust the transcript text if they disagree. When a message is marked \
+as a voice note with medium or low confidence, begin by briefly saying what you \
+understood, in the farmer's language, so they can correct you.
+- Earlier turns that start with [Photo of ...] were photo checks you already answered. \
+Use them to understand follow-up questions about that photo.
 - Each message may include REFERENCE NOTES from the CoopIQ knowledge base. Prefer them \
 when they are relevant and keep any numbers in them exact. If the notes do not cover \
-the question, answer from your own general poultry-farming knowledge, and say so \
+the question, answer from your own general farming knowledge, and say so \
 briefly when you are less sure.
 - For vaccine schedules, medicine names, dosages, withdrawal periods, and costs, only \
 give specific figures if they appear in the reference notes. Otherwise give general \
@@ -103,12 +117,64 @@ guidance and tell the farmer to confirm with a local veterinary or extension off
 - If birds are dying in large numbers or showing severe signs (bloody droppings, \
 gasping, sudden mass deaths), say it is urgent and tell them to contact a vet or the \
 nearest veterinary office right away.
-- If a question is outside poultry farming, answer briefly if it is harmless, then \
-steer back to what you can help with. Never invent facts.
+- If the farmer's message is only a greeting, thanks, or small talk, reply warmly in one \
+or two short sentences, say you are CoopIQ, and invite them to ask about poultry or \
+livestock health, feeding, or vaccination. For these messages ignore the reference notes.
+- If a question has nothing to do with farming, say kindly that you can only help with \
+poultry and livestock, and invite a farm question. Never invent facts.
 
 Format for WhatsApp: short, plain language, short paragraphs or a few simple bullet \
 points, no markdown headers or tables. Keep replies under about 150 words unless the \
 farmer asks for detail."""
+
+
+DIAGNOSE_INSTRUCTIONS = f"""You are the vision model behind CoopIQ's photo disease check on \
+WhatsApp. A farmer in Zambia sent the photo.
+
+First decide what the photo shows and set subject to exactly one of: Poultry droppings, \
+Poultry bird, Cattle, Goat or sheep, Pig, Other. Use Other when the photo shows none of \
+these (for example a person, a document, feed, or a building).
+
+Look at the image and return ONLY a JSON object with these keys:
+subject: as above.
+condition: the most likely condition (poultry examples: Coccidiosis, Newcastle disease, \
+Salmonellosis, Gumboro disease, Fowl pox, Healthy or no clear signs, Unclear). For \
+livestock, name the most likely condition or "Unclear".
+confidence: "High", "Medium" or "Low". Use "Low" when the image is blurry, dark or does \
+not show the problem.
+summary: one or two plain sentences on what you see that supports this.
+recommendation: what to do next. Use the REFERENCE passages where relevant. Do not invent \
+doses; say "confirm the dose with an agrovet" when no dose is in the reference.
+isolate: true if affected animals should be separated from the rest.
+escalate: true if an agrovet or vet should be contacted (always true for Newcastle disease, \
+bloody droppings, sudden deaths, or Low confidence, unless subject is Other).
+language: the language you wrote reply in.
+reply: the complete WhatsApp message to send to the farmer, written in the farmer's \
+language. Plain text, no markdown, under about 150 words. It must say what you see and the \
+likely condition with how sure you are, what to do next, tell them to separate affected \
+animals if isolate is true, tell them to contact an agrovet or vet if escalate is true, and \
+end with one short line saying this is a photo-based guide and not a laboratory result. \
+If subject is Other, set condition to "Unclear", confidence to "Low", isolate and escalate \
+to false, and make reply kindly ask for a clear, well-lit photo of the sick bird, its \
+droppings, or the animal.
+
+Keep subject, condition and confidence in English exactly as described above.
+
+{LANGUAGE_RULE}
+For a photo there is no message text to read the language from. Use the language of the \
+farmer's caption if there is one. If there is no caption, use the language of the farmer's \
+recent messages. If neither exists, use English.
+
+This is decision support, not a laboratory result."""
+
+UNSUPPORTED_IMAGE_REPLY = (
+    "Sorry, I can only check normal photos (JPEG, PNG or WebP). Please take a new photo "
+    "of the bird, droppings or animal and send it as a picture."
+)
+DIAGNOSE_FAILED_REPLY = (
+    "Sorry, I could not check that photo just now. Please try again in a moment, "
+    "or send a clearer photo."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +262,24 @@ def already_processed(message_id: str) -> bool:
 # ---------------------------------------------------------------------------
 # Gemini answer generation
 # ---------------------------------------------------------------------------
-def generate_answer(sender: str, user_text: str, voice_confidence: str = None) -> str:
+def _retrieve_context(query: str, top_k: int) -> str:
+    """Return formatted reference notes for a query, or "" if nothing matched or retrieval failed."""
+    try:
+        passages = retrieve(query, top_k=top_k)
+        logger.info("Retrieval returned %d passages", len(passages) if passages else 0)
+        if passages:
+            return format_context(passages)
+    except Exception:  # noqa: BLE001
+        logger.exception("Retrieval failed; continuing without reference notes")
+    return ""
+
+
+def generate_answer(
+    sender: str,
+    user_text: str,
+    voice_confidence: str = None,
+    voice_language: str = None,
+) -> str:
     """Let Gemini handle the whole conversation, with retrieved notes as optional context."""
     started = time.time()
     history = load_history(sender)
@@ -205,21 +288,15 @@ def generate_answer(sender: str, user_text: str, voice_confidence: str = None) -
     previous_user = [h["parts"][0] for h in history if h["role"] == "user"][-1:]
     retrieval_query = " ".join(previous_user + [user_text])
 
-    context = ""
-    try:
-        passages = retrieve(retrieval_query, top_k=4)
-        logger.info("Retrieval returned %d passages", len(passages) if passages else 0)
-        if passages:
-            context = format_context(passages)
-    except Exception:  # noqa: BLE001
-        logger.exception("Retrieval failed; continuing without reference notes")
+    context = _retrieve_context(retrieval_query, top_k=4)
 
     notes = f"REFERENCE NOTES:\n{context}" if context else "(No reference notes matched this message.)"
     channel = ""
     if voice_confidence:
+        heard = f" Language heard in the audio: {voice_language}." if voice_language else ""
         channel = (
             "[This message is an automatic transcript of a voice note. "
-            f"Transcription confidence: {voice_confidence}.]\n\n"
+            f"Transcription confidence: {voice_confidence}.{heard}]\n\n"
         )
     turn = f"{notes}\n\n{channel}FARMER'S MESSAGE:\n{user_text}"
 
@@ -243,6 +320,104 @@ def generate_answer(sender: str, user_text: str, voice_confidence: str = None) -
     append_history(sender, user_text, answer)
 
     return answer
+
+
+# ---------------------------------------------------------------------------
+# Photo diagnosis (mirrors the "diagnose" action of the Supabase edge function)
+# ---------------------------------------------------------------------------
+def _fallback_diagnosis_reply(condition: str, confidence: str, summary: str,
+                              recommendation: str, isolate: bool, escalate: bool) -> str:
+    """English message built from the structured fields, used only if the model gave no reply."""
+    lines = [f"Likely condition: {condition} (confidence: {confidence})."]
+    if summary:
+        lines.append(summary)
+    if recommendation:
+        lines.append(recommendation)
+    if isolate:
+        lines.append("Separate the affected animals from the rest.")
+    if escalate:
+        lines.append("Please contact an agrovet or vet soon.")
+    lines.append("This is a photo-based guide, not a laboratory result.")
+    return "\n\n".join(lines)
+
+
+def diagnose_image(sender: str, image: dict) -> str:
+    """Check a farmer's photo and return the WhatsApp reply text."""
+    started = time.time()
+    if not image.get("id"):
+        raise ValueError("image message has no media id")
+
+    declared = (image.get("mime_type") or "").split(";")[0].strip().lower()
+    if declared and declared not in IMAGE_MIMES:
+        logger.info("Unsupported image type: %s", declared)
+        return UNSUPPORTED_IMAGE_REPLY
+
+    data, media_mime = download_whatsapp_media(image["id"])
+    mime = declared or (media_mime or "").split(";")[0].strip().lower() or "image/jpeg"
+    if mime not in IMAGE_MIMES:
+        logger.info("Unsupported image type after download: %s", mime)
+        return UNSUPPORTED_IMAGE_REPLY
+
+    caption = (image.get("caption") or "").strip()[:MAX_CAPTION_CHARS]
+    history = load_history(sender)
+    recent_farmer = [h["parts"][0] for h in history if h.get("role") == "user"][-2:]
+
+    # The subject is not known until the model has seen the photo, so retrieve broadly
+    # using the caption and recent messages plus generic disease terms.
+    retrieval_query = " ".join(
+        [t for t in [caption, *recent_farmer, "signs symptoms treatment prevention disease"] if t]
+    )
+    context = _retrieve_context(retrieval_query, top_k=6)
+
+    prompt = (
+        f"{DIAGNOSE_INSTRUCTIONS}\n\n"
+        f"Farmer's caption: {caption or 'none'}\n"
+        "Farmer's recent messages (for language and context only):\n"
+        f"{chr(10).join(recent_farmer) if recent_farmer else 'none'}\n\n"
+        f"REFERENCE:\n{context or '(none)'}"
+    )
+
+    logger.info("Calling Gemini for photo check model=%s (%d image bytes)", GENERATION_MODEL, len(data))
+    model = genai.GenerativeModel(GENERATION_MODEL)
+    response = model.generate_content(
+        [{"mime_type": mime, "data": data}, prompt],
+        generation_config={
+            "temperature": 0.2,
+            "response_mime_type": "application/json",
+            "max_output_tokens": 2000,
+        },
+    )
+    raw = response.text.replace("```json", "").replace("```", "").strip()
+    result = json.loads(raw)
+    if not isinstance(result, dict):
+        raise ValueError("photo check did not return a JSON object")
+
+    subject = result.get("subject") if result.get("subject") in DIAGNOSE_SUBJECTS else "Other"
+    raw_conf = str(result.get("confidence", "low")).lower()
+    conf = raw_conf if raw_conf in ("high", "medium", "low") else "low"
+    confidence = conf.capitalize()
+    condition = str(result.get("condition") or "Unclear")[:120]
+    summary = str(result.get("summary") or "")[:800]
+    recommendation = str(result.get("recommendation") or "")[:1200]
+    isolate = result.get("isolate") is True
+    escalate = result.get("escalate") is True or (conf == "low" and subject != "Other")
+
+    logger.info(
+        "Photo check: subject=%s condition=%s confidence=%s isolate=%s escalate=%s language=%s (%.1fs)",
+        subject, condition, confidence, isolate, escalate, result.get("language"),
+        time.time() - started,
+    )
+
+    reply = str(result.get("reply") or "").strip()
+    if not reply:
+        reply = _fallback_diagnosis_reply(condition, confidence, summary, recommendation, isolate, escalate)
+
+    # Keep a plain-text record so follow-up questions about the photo make sense.
+    note = f"[Photo of {subject}]"
+    if caption:
+        note = f"{note} {caption}"
+    append_history(sender, note, reply)
+    return reply
 
 
 # ---------------------------------------------------------------------------
@@ -325,7 +500,7 @@ def send_whatsapp_message(to: str, body: str, phone_number_id: str = None) -> No
 
 
 def download_whatsapp_media(media_id: str):
-    """Fetch a WhatsApp media file (e.g. a voice note). Returns (bytes, mime_type)."""
+    """Fetch a WhatsApp media file (e.g. a voice note or photo). Returns (bytes, mime_type)."""
     headers = {"Authorization": f"Bearer {WA_TOKEN}"}
     meta = requests.get(f"{GRAPH_URL}/{media_id}", headers=headers, timeout=15)
     meta.raise_for_status()
@@ -352,7 +527,7 @@ Return only JSON: {"transcript": "...", "language": "...", "confidence": "high|m
 
 
 def transcribe_voice_note(audio: dict):
-    """Return (transcript, confidence) for a WhatsApp voice note, or (None, None) on failure."""
+    """Return (transcript, confidence, language) for a voice note, or (None, None, None) on failure."""
     try:
         data, media_mime = download_whatsapp_media(audio["id"])
         mime = (audio.get("mime_type") or media_mime or "audio/ogg").split(";")[0].strip()
@@ -366,14 +541,15 @@ def transcribe_voice_note(audio: dict):
         confidence = str(result.get("confidence", "low")).lower()
         if confidence not in ("high", "medium", "low"):
             confidence = "low"
+        language = (str(result.get("language") or "").strip() or None)
         logger.info(
             "Voice note transcribed (language=%s, confidence=%s): %s",
-            result.get("language"), confidence, transcript,
+            language, confidence, transcript,
         )
-        return (transcript or None), confidence
+        return (transcript or None), confidence, language
     except Exception:  # noqa: BLE001
         logger.exception("Voice note transcription failed")
-        return None, None
+        return None, None, None
 
 
 def extract_phone_number_id(payload: dict):
@@ -385,17 +561,18 @@ def extract_phone_number_id(payload: dict):
 
 
 def extract_incoming_message(payload: dict):
-    """Return (sender, message_id, text, audio) from a WhatsApp webhook payload.
+    """Return (sender, message_id, text, audio, image) from a WhatsApp webhook payload.
 
     sender is None for non-message events (e.g. delivery status updates).
     text is None unless the message is text or a button/list reply.
     audio is {"id": ..., "mime_type": ...} for voice notes and audio files, else None.
+    image is {"id": ..., "mime_type": ..., "caption": ...} for photos, else None.
     """
     try:
         value = payload["entry"][0]["changes"][0]["value"]
         messages = value.get("messages")
         if not messages:
-            return None, None, None, None
+            return None, None, None, None, None
         message = messages[0]
         sender = message["from"]
         message_id = message.get("id")
@@ -403,18 +580,25 @@ def extract_incoming_message(payload: dict):
         logger.info("Parsed message: type=%s from=%s id=%s", msg_type, _mask(sender), message_id)
 
         if msg_type == "text":
-            return sender, message_id, message["text"]["body"], None
+            return sender, message_id, message["text"]["body"], None, None
         if msg_type == "interactive":
             interactive = message.get("interactive", {})
             reply = interactive.get("button_reply") or interactive.get("list_reply") or {}
-            return sender, message_id, reply.get("title"), None
+            return sender, message_id, reply.get("title"), None, None
         if msg_type == "audio":
             audio = message.get("audio", {})
-            return sender, message_id, None, {"id": audio.get("id"), "mime_type": audio.get("mime_type")}
-        return sender, message_id, None, None
+            return sender, message_id, None, {"id": audio.get("id"), "mime_type": audio.get("mime_type")}, None
+        if msg_type == "image":
+            img = message.get("image", {})
+            return sender, message_id, None, None, {
+                "id": img.get("id"),
+                "mime_type": img.get("mime_type"),
+                "caption": (img.get("caption") or "").strip(),
+            }
+        return sender, message_id, None, None, None
     except (KeyError, IndexError, TypeError):
         logger.exception("Could not parse webhook payload")
-        return None, None, None, None
+        return None, None, None, None, None
 
 
 STATUS_HINTS = {
@@ -521,7 +705,7 @@ def handle_webhook():
     else:
         logger.info("Incoming webhook payload received (%d bytes)", len(request.get_data() or b""))
 
-    sender, message_id, text, audio = extract_incoming_message(payload)
+    sender, message_id, text, audio, image = extract_incoming_message(payload)
 
     if not sender:
         # Not a user message (e.g. a status update): acknowledge and ignore.
@@ -543,10 +727,22 @@ def handle_webhook():
         logger.info("Ignored duplicate message %s", message_id)
         return jsonify({"status": "duplicate"}), 200
 
+    # Photos: run the disease check and reply.
+    if image:
+        logger.info("Photo received (caption=%s), running photo check", "yes" if image.get("caption") else "no")
+        try:
+            reply = diagnose_image(sender, image)
+        except Exception:  # noqa: BLE001
+            logger.exception("Photo check failed (model=%s)", GENERATION_MODEL)
+            reply = DIAGNOSE_FAILED_REPLY
+        send_whatsapp_message(sender, reply, reply_from)
+        return jsonify({"status": "received"}), 200
+
     voice_confidence = None
+    voice_language = None
     if audio:
         logger.info("Voice note received, transcribing")
-        text, voice_confidence = transcribe_voice_note(audio)
+        text, voice_confidence, voice_language = transcribe_voice_note(audio)
         if not text:
             logger.warning("Voice note produced no transcript")
             send_whatsapp_message(
@@ -561,15 +757,16 @@ def handle_webhook():
         logger.info("Unsupported message type; sending help text")
         send_whatsapp_message(
             sender,
-            "I can read text messages and voice notes. Please send your poultry-farming "
-            "question that way and I'll do my best to help!",
+            "I can read text messages and voice notes, and check photos of sick birds, "
+            "droppings or animals. Please send your farming question or a photo and "
+            "I'll do my best to help!",
             reply_from,
         )
         return jsonify({"status": "received"}), 200
 
     logger.info("Answering message from %s: %s", _mask(sender), text[:200])
     try:
-        answer = generate_answer(sender, text, voice_confidence)
+        answer = generate_answer(sender, text, voice_confidence, voice_language)
     except Exception:  # noqa: BLE001
         logger.exception("Error generating answer (model=%s)", GENERATION_MODEL)
         answer = (
