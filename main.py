@@ -182,15 +182,15 @@ confidence: "High", "Medium" or "Low". Use "Low" when the image is blurry, dark 
 not show the problem.
 summary: one or two plain sentences on what you see that supports this.
 recommendation: what to do next. Use the REFERENCE passages where relevant. Do not invent \
-doses; say "confirm the dose with an agrovet" when no dose is in the reference.
+doses; say "confirm the dose with an vet" when no dose is in the reference.
 isolate: true if affected animals should be separated from the rest.
-escalate: true if an agrovet or vet should be contacted (always true for Newcastle disease, \
+escalate: true if an vet or vet should be contacted (always true for Newcastle disease, \
 bloody droppings, sudden deaths, or Low confidence, unless subject is Other).
 language: the language you wrote reply in.
 reply: the complete WhatsApp message to send to the farmer, written in the farmer's \
 language. Plain text, no markdown, under about 150 words. It must say what you see and the \
 likely condition with how sure you are, what to do next, tell them to separate affected \
-animals if isolate is true, tell them to contact an agrovet or vet if escalate is true, and \
+animals if isolate is true, tell them to contact an vet or vet if escalate is true, and \
 end with one short line saying this is a photo-based guide and not a laboratory result. \
 If subject is Other, set condition to "Unclear", confidence to "Low", isolate and escalate \
 to false, and make reply kindly ask for a clear, well-lit photo of the sick bird, its \
@@ -602,7 +602,7 @@ def _fallback_diagnosis_reply(condition: str, confidence: str, summary: str,
     if isolate:
         lines.append("Separate the affected animals from the rest.")
     if escalate:
-        lines.append("Please contact an agrovet or vet soon.")
+        lines.append("Please contact an vet or vet soon.")
     lines.append("This is a photo-based guide, not a laboratory result.")
     return "\n\n".join(lines)
 
