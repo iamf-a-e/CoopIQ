@@ -138,7 +138,7 @@ POULTRY_KNOWLEDGE_BASE: List[Dict[str, str]] = [
     },
     {
         "id": "doc3_vaccination_001",
-        "text": "Vaccination schedule for broilers: Day 1 - Marek's and Newcastle administered at hatchery. Day 7 - Gumboro (1st dose) mixed in clean drinking water with skimmed milk powder. Day 14 - Newcastle (1st dose) mixed in drinking water or eye drops. Day 18 - Gumboro (2nd booster) mixed in drinking water. Day 24 - Newcastle (2nd booster) mixed in drinking water. Never give vaccinated water containing chlorine or tap chemicals. Use borehole water, or let tap water sit uncovered for 24 hours before mixing vaccines.",
+        "text": "Vaccination schedule for broilers: Day 1 - Marek's and Newcastle administered at hatchery. Day 10 - Gumboro (1st dose) mixed in clean drinking water with skimmed milk powder. Day 14 - Newcastle (1st dose) mixed in drinking water or eye drops. Day 18 - Gumboro (2nd booster) mixed in drinking water. Day 24 - Newcastle (2nd booster) mixed in drinking water. Never give vaccinated water containing chlorine or tap chemicals. Use borehole water, or let tap water sit uncovered for 24 hours before mixing vaccines.",
         "source": "Broiler Chicken Rearing Business in Zambia (2026)",
         "section": "Vaccination and Health Management",
         "topic": "Vaccination Schedule",
