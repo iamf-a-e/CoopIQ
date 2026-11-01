@@ -116,6 +116,11 @@ INTAKE_PHONE_QUESTION = "What's the best phone number for a vet to call you on?"
 INTAKE_PHONE_RETRY = "That doesn't look like a phone number. Could you send it again?"
 _PHONE_PATTERN = re.compile(r"^[+\d][\d\s().-]{6,19}$")
 
+# A farmer can type this to wipe their own chat and start over, as a brand-new farmer would.
+# Useful for testing and demos from a single number, without waiting for a new one.
+CLEAR_KEYWORDS = {"clear", "reset"}
+CLEAR_REPLY = "Okay, I've cleared our chat. Send \"hello\" to start again from the beginning."
+
 if GEN_API:
     genai.configure(api_key=GEN_API)
 
@@ -586,6 +591,23 @@ def save_farmer_profile(sender: str, **fields) -> None:
             logger.exception("Failed to save farmer profile (columns may be missing)")
         return
     _local_farmers.setdefault(sender, {}).update(fields)
+
+
+def reset_farmer(sender: str) -> None:
+    """Wipe a farmer's saved profile, intake progress and chat history, so their next message
+    is treated as first contact again. Used for the "clear" keyword."""
+    if _supabase_enabled():
+        try:
+            _sb("DELETE", "farmers", params={"phone": f"eq.{sender}"}, prefer="return=minimal")
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to delete farmer row during reset")
+        try:
+            _sb("DELETE", "chat_messages", params={"sender": f"eq.{sender}"}, prefer="return=minimal")
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to delete chat history during reset")
+        return
+    _local_farmers.pop(sender, None)
+    _local_history.pop(sender, None)
 
 
 def advance_intake(sender: str, step: str, text: str) -> tuple:
@@ -1484,6 +1506,12 @@ def handle_webhook():
     if already_processed(message_id):
         logger.info("Ignored duplicate message %s", message_id)
         return jsonify({"status": "duplicate"}), 200
+
+    if text and text.strip().lower() in CLEAR_KEYWORDS:
+        logger.info("Clear requested by %s", _mask(sender))
+        reset_farmer(sender)
+        send_whatsapp_message(sender, CLEAR_REPLY, reply_from)
+        return jsonify({"status": "reset"}), 200
 
     # Read the previous last_seen BEFORE touch_farmer overwrites it with now.
     last_seen = get_last_seen(sender)
