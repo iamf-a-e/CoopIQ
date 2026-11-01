@@ -75,10 +75,28 @@ VET_NAME = "Memory"
 VET_PHONE = "+260779722215"
 VET_REFERENCE = f"{VET_NAME} from the CoopIQ team on {VET_PHONE}"
 
-# Menu options: (id sent back when a button is tapped, button title). WhatsApp allows at most
-# 3 buttons per message and 20 characters per title. Each option's position is its number.
-OPTION_NAMES = {"check": "Check my animal", "vet": "Get a vet", "ask": "Ask a question"}
-MAIN_MENU = [("check", "1. Check my animal"), ("vet", "2. Get a vet"), ("ask", "3. Ask a question")]
+# The person farmers call to buy medicine.
+MEDICINE_NAME = "Marcus"
+MEDICINE_PHONE = "+260962810888"
+MEDICINE_REFERENCE = f"{MEDICINE_NAME} from the CoopIQ medicine team on {MEDICINE_PHONE}"
+
+# Menu options: (id sent back when an option is tapped, title). WhatsApp allows at most 3 reply
+# buttons with 20 character titles, so a longer menu is sent as a list (24 character titles).
+# Each option's position is its number.
+OPTION_NAMES = {
+    "check": "Check my animal",
+    "vet": "Get a vet",
+    "ask": "Ask a question",
+    "medicine": "Buy medicine",
+}
+MAIN_MENU = [
+    ("check", "1. Check my animal"),
+    ("vet", "2. Get a vet"),
+    ("ask", "3. Ask a question"),
+    ("medicine", "4. Buy medicine"),
+]
+MAX_REPLY_BUTTONS = 3
+LIST_BUTTON_TEXT = "See options"
 AFTER_CHECK_MENU = [("vet", "1. Get a vet"), ("check", "2. Check another")]
 AFTER_ANSWER_MENU = [("vet", "1. Get a vet"), ("ask", "2. Ask another")]
 MENU_FOOTER = "Tap an option or reply with its number"
@@ -147,7 +165,9 @@ VET_CONTACT_RULE = f"""To get a vet, the farmer calls {VET_NAME} from the CoopIQ
 visit or a phone call, and explains the cost. Never describe {VET_NAME} as a vet. Give this \
 name and number ONLY when the case is urgent or the farmer asks how to reach a vet. Otherwise \
 do not write the number, because the farmer sees a "Get a vet" option under your message. \
-Never give any other number."""
+If the farmer asks where to buy medicine or wants it delivered, tell them to call \
+{MEDICINE_NAME} from the CoopIQ medicine team on {MEDICINE_PHONE}, who can deliver anywhere in \
+Zambia. Never give any other number."""
 
 SYSTEM_PROMPT = f"""You are CoopIQ, a friendly, practical helper for smallholder and \
 commercial poultry farmers in Zambia. You help with broiler, layer, and village chicken \
@@ -300,6 +320,11 @@ OPTION_REPLIES = {
     "ask": (
         "Sure. You can ask me about feeding, vaccination, housing, keeping your animals healthy, "
         "costs or selling your birds. What would you like to know?"
+    ),
+    "medicine": (
+        f"Please call {MEDICINE_REFERENCE}.\n\n"
+        f"Tell {MEDICINE_NAME} what medicine you need and where you are. {MEDICINE_NAME} will "
+        "explain the cost and arrange delivery to you anywhere in Zambia, by courier if needed."
     ),
 }
 
@@ -958,13 +983,13 @@ def diagnose_image(sender: str, image: dict) -> tuple:
 # WhatsApp Cloud API helpers
 # ---------------------------------------------------------------------------
 def send_whatsapp_message(to: str, body: str, phone_number_id: str = None, menu: list = None) -> None:
-    """Send a text message, with reply buttons if a menu is given.
+    """Send a text message, with reply buttons or a list if a menu is given.
 
     Replies go out from `phone_number_id` (the number that RECEIVED the message) when
     given, falling back to the PHONE_ID env var. This guarantees the reply appears in
     the same chat the farmer wrote in, even if PHONE_ID is misconfigured.
 
-    If WhatsApp rejects the buttons, the options are sent again as numbered text.
+    If WhatsApp rejects the menu, the options are sent again as numbered text.
     """
     sender_id = phone_number_id or PHONE_ID
     body = clean_reply(body)  # every outgoing message passes through here
@@ -991,16 +1016,25 @@ def send_whatsapp_message(to: str, body: str, phone_number_id: str = None, menu:
     payload = {"messaging_product": "whatsapp", "to": to}
     if menu:
         payload["type"] = "interactive"
-        payload["interactive"] = {
-            "type": "button",
-            "body": {"text": body},
-            "footer": {"text": MENU_FOOTER},
-            "action": {
+        if len(menu) > MAX_REPLY_BUTTONS:
+            interactive_type = "list"
+            action = {
+                "button": LIST_BUTTON_TEXT,
+                "sections": [{"rows": [{"id": option_id, "title": title} for option_id, title in menu]}],
+            }
+        else:
+            interactive_type = "button"
+            action = {
                 "buttons": [
                     {"type": "reply", "reply": {"id": option_id, "title": title}}
                     for option_id, title in menu
                 ]
-            },
+            }
+        payload["interactive"] = {
+            "type": interactive_type,
+            "body": {"text": body},
+            "footer": {"text": MENU_FOOTER},
+            "action": action,
         }
     else:
         payload["type"] = "text"
@@ -1115,10 +1149,10 @@ def transcribe_voice_note(audio: dict):
 
 
 def extract_button_id(payload: dict):
-    """Return the id of a tapped reply button, or None if this message isn't a button tap."""
+    """Return the id of a tapped button or list option, or None if this message isn't a tap."""
     try:
-        message = payload["entry"][0]["changes"][0]["value"]["messages"][0]
-        return message["interactive"]["button_reply"]["id"]
+        interactive = payload["entry"][0]["changes"][0]["value"]["messages"][0]["interactive"]
+        return (interactive.get("button_reply") or interactive.get("list_reply"))["id"]
     except (KeyError, IndexError, TypeError):
         return None
 
