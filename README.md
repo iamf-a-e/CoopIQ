@@ -36,6 +36,9 @@ $env:GEN_API="your-gemini-api-key"
 $env:VERIFY_TOKEN="your-webhook-verify-token"
 ```
 
+The vet contact's name and number are set by `VET_NAME` and `VET_PHONE` at the
+top of `main.py`.
+
 ## Build the knowledge base embeddings
 
 The RAG layer retrieves passages from `poultry_data.py` by vector search.
@@ -94,9 +97,10 @@ API webhook settings.
 - Knowledge base content should be reviewed periodically for accuracy and
   currency, especially figures like vaccination schedules, dosages, and
   costs, which change over time.
-- Answers are grounded strictly in `poultry_data.py` via the retrieval step;
-  if nothing relevant is found, CoopIQ tells the farmer rather than
-  guessing.
+- Answers prefer the passages retrieved from `poultry_data.py`. If nothing
+  relevant is found, CoopIQ answers from Gemini's general farming knowledge,
+  but only gives specific vaccine, medicine, dose, and cost figures when they
+  appear in the retrieved passages.
 
 ## Deploy
 

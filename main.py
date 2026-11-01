@@ -70,6 +70,23 @@ MAX_CAPTION_CHARS = 600
 IMAGE_BUCKET = os.environ.get("IMAGE_BUCKET", "farmer-images")
 IMAGE_EXT = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
 
+# The person farmers call when they need a vet.
+VET_NAME = "Memory"
+VET_PHONE = "+260779722215"
+VET_REFERENCE = f"{VET_NAME} from our vet team on {VET_PHONE}"
+
+# Menu options: (id sent back when a button is tapped, button title). WhatsApp allows at most
+# 3 buttons per message and 20 characters per title. Each option's position is its number.
+OPTION_NAMES = {"check": "Check my animal", "vet": "Talk to a vet", "ask": "Ask a question"}
+MAIN_MENU = [("check", "1. Check my animal"), ("vet", "2. Talk to a vet"), ("ask", "3. Ask a question")]
+AFTER_CHECK_MENU = [("vet", "1. Talk to a vet"), ("check", "2. Check another")]
+AFTER_ANSWER_MENU = [("vet", "1. Talk to a vet"), ("ask", "2. Ask another")]
+MENU_FOOTER = "Tap an option or reply with its number"
+MENU_PROMPT = "What would you like to do next?"
+WELCOME_REPLY = "Hello, I'm CoopIQ. How can I help you today?"
+GREETING_TAG = "[GREETING]"
+INTERACTIVE_BODY_MAX_CHARS = 1024  # WhatsApp's limit for a message with buttons
+
 if GEN_API:
     genai.configure(api_key=GEN_API)
 
@@ -117,53 +134,87 @@ signal at all, such as "ok", "yes", "thanks" or a number. If you still cannot te
 write in a language you do not support, reply in simple English. Use short, simple \
 sentences, and keep technical terms such as vaccine, drug, and disease names in English."""
 
-SYSTEM_PROMPT = f"""You are CoopIQ, a friendly, practical WhatsApp assistant for \
-smallholder and commercial poultry farmers in Zambia. You help with broiler, layer, \
-and village chicken farming: housing, brooding, feeding, vaccination and disease \
-prevention, biosecurity, budgeting, and marketing. You can also answer basic health \
-and feeding questions about cattle, goats, sheep, and pigs.
+# Shared by the chat prompt and the photo-check prompt so both sound like the same person.
+STYLE_RULE = """Write like a kind, experienced farm helper texting a neighbour on WhatsApp. \
+Use everyday words and contractions. Plain text only: no bullets, no lists, no headers, no \
+bold, and no emojis unless the farmer uses them. Never use em dashes or en dashes: use a \
+comma, a full stop, or the word "and" instead, and write ranges as "2 to 3 weeks". Avoid \
+stock phrases such as "I understand your concern", "I'm here to help", "Great question", \
+or "Please note"."""
 
-How to behave:
-- Talk naturally. Handle greetings, thanks, and follow-up questions like a helpful \
-person would. Use the conversation so far to understand what "it", "that", or "how \
-often" refers to.
+VET_CONTACT_RULE = f"""The vet contact is {VET_NAME} from our vet team, phone {VET_PHONE}, \
+for a farm visit or a call. Give this name and number ONLY when the case is urgent or the farmer \
+asks how to reach a vet. Otherwise do not write the number, because the farmer sees a "Talk to a \
+vet" option under your message. Never give any other number."""
+
+SYSTEM_PROMPT = f"""You are CoopIQ, a friendly, practical helper for smallholder and \
+commercial poultry farmers in Zambia, working alongside our vet team. You help with broiler, \
+layer, and village chicken farming: housing, brooding, feeding, vaccination and disease \
+prevention, biosecurity, budgeting, and marketing. You can also answer basic health and \
+feeding questions about cattle, goats, sheep, and pigs. You give quick guidance and our vets \
+do the diagnosing and treating, so your job is to help the farmer and get them to a vet.
+
+How to sound:
+- {STYLE_RULE}
+- Keep replies to 2 to 4 short lines, unless the farmer asks for more detail.
+- When a farmer describes a problem, react like a person first, in a few words, for example \
+"Oh no, that's worrying." Then help. Don't do this for simple questions.
+- Use the conversation so far to understand what "it", "that", or "how often" refers to.
+
+How to help:
+- If you need more information, ask ONE question and wait for the answer, for example how \
+many birds are affected, how old they are, how many have died, or when it started. Never ask \
+several questions at once. Don't ask what the farmer has already told you.
+- URGENT: if animals are dying in large numbers or showing severe signs (bloody droppings, \
+gasping, sudden mass deaths), do not ask questions first. Make your first line say it is \
+urgent and give the vet's name and number so they can call right now, then give one or two \
+things to do meanwhile, such as keeping sick birds apart from the others.
+- Never state a diagnosis as fact. Say what it could be and that a vet needs to confirm it.
+- If you are unsure or the animals are sick, say clearly that a vet should look. Don't add a \
+vet mention to routine answers. {VET_CONTACT_RULE}
+- Each message may include REFERENCE NOTES from the CoopIQ knowledge base. Prefer them when \
+they are relevant and keep any numbers in them exact. If the notes do not cover the question, \
+answer from your own general farming knowledge, and say so briefly when you are less sure.
+- For vaccine schedules, medicine names, dosages, withdrawal periods, and costs, only give \
+specific figures if they appear in the reference notes. Otherwise give general guidance and \
+say a vet can confirm the details. Never invent facts.
+- If a question has nothing to do with farming, say kindly in the farmer's language that \
+you only help with poultry and livestock.
+
+Language:
 - {LANGUAGE_RULE}
 - Some messages are voice notes that were transcribed automatically, so the text may \
 contain mishearings, especially of local words. Use the context to work out the most \
 likely meaning. A voice note may be marked with the language heard in the audio: treat \
 that as a hint, and trust the transcript text if they disagree. When a message is marked \
-as a voice note with medium or low confidence, begin by briefly saying what you \
-understood, in the farmer's language, so they can correct you.
+as a voice note with medium or low confidence, start by saying what you understood, in the \
+farmer's language, so they can correct you, for example "I think you're asking about..."
 - Earlier turns that start with [Photo of ...] were photo checks you already answered. \
 Use them to understand follow-up questions about that photo.
-- Each message may include REFERENCE NOTES from the CoopIQ knowledge base. Prefer them \
-when they are relevant and keep any numbers in them exact. If the notes do not cover \
-the question, answer from your own general farming knowledge, and say so \
-briefly when you are less sure.
-- For vaccine schedules, medicine names, dosages, withdrawal periods, and costs, only \
-give specific figures if they appear in the reference notes. Otherwise give general \
-guidance and tell the farmer to confirm with a local veterinary or extension officer.
-- If birds are dying in large numbers or showing severe signs (bloody droppings, \
-gasping, sudden mass deaths), say it is urgent and tell them to contact a vet or the \
-nearest veterinary office right away.
+
+Greetings:
+- Only introduce yourself as CoopIQ when the message tells you this is FIRST CONTACT.
 - If the farmer's message is only a greeting, thanks, or small talk, reply warmly in one \
 or two short sentences WRITTEN IN THE FARMER'S LANGUAGE (follow the language rule above, \
-not English by default), say you are CoopIQ, and invite them to ask about poultry or \
-livestock health, feeding, or vaccination. Translate that invitation into their language \
-too. For these messages ignore the reference notes. Examples of greetings and the \
-language they signal:
+not English by default), and ask how you can help today. For these messages ignore the \
+reference notes. Examples of greetings and the language they signal:
     "Muli shani" -> Bemba: reply in Bemba.
     "Muli bwanji" or "Zikomo" -> Nyanja: reply in Nyanja.
     "Mwabuka buti" or "Mwalibizya buti" -> Tonga: reply in Tonga.
     "Lumela" or "Muzuhile" -> Lozi: reply in Lozi.
     "Hello" or "Good morning" -> English: reply in English.
-- If a question has nothing to do with farming, say kindly that you can only help with \
-poultry and livestock, and invite a farm question, in the farmer's language. \
-Never invent facts.
 
-Format for WhatsApp: short, plain language, short paragraphs or a few simple bullet \
-points, no markdown headers or tables. Keep replies under about 150 words unless the \
-farmer asks for detail."""
+These English examples show the tone. Don't copy their wording, and write in the farmer's \
+language.
+Farmer: my chicks are dying, 5 this morning
+You: Oh no, I'm sorry, that's hard. How old are the chicks?
+Farmer: how much feed does a broiler eat?
+You: (give the figure from the notes in one or two lines)
+Farmer: many birds died overnight, there's blood in the droppings
+You: This is urgent, please call {VET_NAME} from our vet team now on {VET_PHONE} for a farm \
+visit. Meanwhile, keep the sick birds away from the others.
+
+Some older messages in this chat may be long or use bullet points. Don't copy that style."""
 
 
 DIAGNOSE_INSTRUCTIONS = f"""You are the vision model behind CoopIQ's photo disease check on \
@@ -184,35 +235,104 @@ summary: one or two plain sentences on what you see that supports this.
 recommendation: what to do next. Use the REFERENCE passages where relevant. Do not invent \
 doses; say "confirm the dose with a vet" when no dose is in the reference.
 isolate: true if affected animals should be separated from the rest.
-escalate: true if a vet or vet should be contacted (always true for Newcastle disease, \
-bloody droppings, sudden deaths, or Low confidence, unless subject is Other).
+escalate: true if a vet should be contacted (always true for Newcastle disease, bloody \
+droppings, sudden deaths, or Low confidence, unless subject is Other).
 language: the language you wrote reply in.
 reply: the complete WhatsApp message to send to the farmer, written in the farmer's \
-language. Plain text, no markdown, under about 150 words. It must say what you see and the \
-likely condition with how sure you are, what to do next, tell them to separate affected \
-animals if isolate is true, tell them to contact a vet or vet if escalate is true, and \
-end with one short line saying this is a photo-based guide and not a laboratory result. \
-If subject is Other, set condition to "Unclear", confidence to "Low", isolate and escalate \
-to false, and make reply kindly ask for a clear, well-lit photo of the sick bird, its \
-droppings, or the animal.
+language, as 2 to 4 short lines. It must sound like a person who has just looked at the \
+photo, not like a report. Do not use labels such as "Condition:" or "Confidence:", and do \
+not give a confidence rating. In your own words, say what you can see and what it could be, \
+then say a vet needs to confirm it. If the photo points to something serious, such as bloody \
+droppings or signs of Newcastle disease, make your first line say it is urgent and give the \
+vet's name and number. Give the next step. If isolate is true, tell them to keep the affected \
+animals away from the others. If escalate is true, say clearly that a vet should look. If \
+confidence is Low, say you can't tell from this photo and ask for one clearer, well-lit \
+photo. Do not add a disclaimer about photos or laboratory results. If subject is Other, set condition to "Unclear", confidence to "Low", isolate and \
+escalate to false, and make reply kindly ask for a clear, well-lit photo of the sick bird, \
+its droppings, or the animal.
+
+{STYLE_RULE}
+
+{VET_CONTACT_RULE}
 
 Keep subject, condition and confidence in English exactly as described above.
 
 {LANGUAGE_RULE}
 For a photo there is no message text to read the language from. Use the language of the \
 farmer's caption if there is one. If there is no caption, use the language of the farmer's \
-recent messages. If neither exists, use English.
-
-This is decision support, not a laboratory result."""
+recent messages. If neither exists, use English."""
 
 UNSUPPORTED_IMAGE_REPLY = (
-    "Sorry, I can only check normal photos (JPEG, PNG or WebP). Please take a new photo "
-    "of the bird, droppings or animal and send it as a picture."
+    "I can't open that type of file. Could you take a photo of the bird, droppings or "
+    "animal and send it as a normal picture?"
 )
 DIAGNOSE_FAILED_REPLY = (
-    "Sorry, I could not check that photo just now. Please try again in a moment, "
-    "or send a clearer photo."
+    "Sorry, I couldn't check that photo just now. Please send it again in a minute. "
+    f"If your animals are really sick, don't wait, please contact {VET_REFERENCE}."
 )
+VOICE_FAILED_REPLY = (
+    "Sorry, I couldn't hear that voice note properly. Could you record it again somewhere "
+    "quieter, or type it out for me?"
+)
+UNSUPPORTED_MESSAGE_REPLY = (
+    "I can't read that kind of message, but you can type to me, send a voice note, or send "
+    "a photo of a sick bird, droppings or animal. What's going on with your animals?"
+)
+ANSWER_FAILED_REPLY = (
+    "Sorry, something went wrong on my side. Please send that again in a minute. "
+    f"If your animals are really sick, don't wait, please contact {VET_REFERENCE}."
+)
+
+# What the bot sends when a farmer picks a menu option.
+OPTION_REPLIES = {
+    "vet": f"Please call {VET_REFERENCE} for a farm visit or a call.",
+    "check": (
+        "No problem. Send me a photo of the animal or its droppings, or tell me what's wrong "
+        "by text or voice note."
+    ),
+    "ask": "Sure, what would you like to know?",
+}
+
+
+def clean_reply(text: str) -> str:
+    """Remove em and en dashes from a message, keeping number ranges and line breaks readable."""
+    if not text:
+        return text
+    dashes = "‒–—―"
+    # "2–3 weeks" becomes "2 to 3 weeks".
+    text = re.sub(rf"(?<=\d)[ \t]*[{dashes}][ \t]*(?=\d)", " to ", text)
+    # A dash at the start or end of a line is dropped.
+    text = re.sub(rf"^[ \t]*[{dashes}]+[ \t]*", "", text, flags=re.MULTILINE)
+    text = re.sub(rf"[ \t]*[{dashes}]+[ \t]*$", "", text, flags=re.MULTILINE)
+    # An unspaced en dash joins words ("Jan–Mar"), so it becomes a hyphen.
+    text = re.sub(r"(?<=\w)[‒–](?=\w)", "-", text)
+    # Any other dash separates parts of a sentence, so it becomes a comma.
+    text = re.sub(rf"[ \t]*[{dashes}]+[ \t]*", ", ", text)
+    # Tidy up if the dash sat next to other punctuation ("well —, ok" or "ok, — fine").
+    text = re.sub(r",[ \t]*([,.!?;:])", r"\1", text)
+    return text
+
+
+# Saved replies end with a marker listing the options they showed, in order. That is how a
+# typed "2" can be matched to the right option on the next message without a database change.
+_OPTIONS_MARKER = re.compile(r"\s*\[Options: ([a-z,]+)\]\s*$")
+
+
+def with_options_marker(reply: str, menu: list) -> str:
+    """Return the reply as it should be saved, recording which options it showed."""
+    if not menu:
+        return reply
+    return f"{reply}\n\n[Options: {','.join(option_id for option_id, _ in menu)}]"
+
+
+def strip_options_marker(reply: str) -> str:
+    return _OPTIONS_MARKER.sub("", reply)
+
+
+def options_in(reply: str) -> list:
+    """Return the option ids a saved reply showed, in order, or [] if it showed none."""
+    match = _OPTIONS_MARKER.search(reply or "")
+    return match.group(1).split(",") if match else []
 
 
 # ---------------------------------------------------------------------------
@@ -285,15 +405,50 @@ def load_history(sender: str) -> list:
                 },
             ) or []
             rows.reverse()  # newest-first from the query, oldest-first for Gemini
-            history = _start_with_user([{"role": r["role"], "parts": [r["content"]]} for r in rows])
+            history = _start_with_user([
+                {"role": r["role"], "parts": [_for_model(r["role"], r["content"])]}
+                for r in rows
+            ])
             logger.info("History loaded from Supabase: %d messages for %s", len(history), _mask(sender))
             return history
         except Exception:  # noqa: BLE001
             logger.exception("Failed to load history from Supabase")
             return []
-    history = _start_with_user(_local_history.get(sender, [])[-CONTEXT_MESSAGES:])
+    history = _start_with_user([
+        {"role": h["role"], "parts": [_for_model(h["role"], h["parts"][0])]}
+        for h in _local_history.get(sender, [])[-CONTEXT_MESSAGES:]
+    ])
     logger.info("History loaded from memory: %d messages for %s", len(history), _mask(sender))
     return history
+
+
+def _for_model(role: str, content: str) -> str:
+    """Hide the options marker from the model, and any dashes in older saved replies, so it
+    doesn't imitate either."""
+    return clean_reply(strip_options_marker(content)) if role == "model" else content
+
+
+def load_last_reply(sender: str) -> str:
+    """Return the bot's last saved reply including its options marker, or "" if there is none."""
+    if _supabase_enabled():
+        try:
+            rows = _sb(
+                "GET",
+                "chat_messages",
+                params={
+                    "select": "content",
+                    "sender": f"eq.{sender}",
+                    "role": "eq.model",
+                    "order": "id.desc",
+                    "limit": "1",
+                },
+            ) or []
+            return rows[0]["content"] if rows else ""
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to load last reply from Supabase")
+            return ""
+    replies = [h for h in _local_history.get(sender, []) if h["role"] == "model"]
+    return replies[-1]["parts"][0] if replies else ""
 
 
 def append_history(sender: str, user_text: str, answer: str) -> None:
@@ -520,13 +675,21 @@ def generate_answer(
     voice_confidence: str = None,
     voice_language: str = None,
     recently_chatted: bool = False,
-) -> str:
-    """Let Gemini handle the whole conversation, with retrieved notes as optional context."""
+    first_contact: bool = False,
+) -> tuple:
+    """Let Gemini handle the whole conversation, with retrieved notes as optional context.
+
+    Returns (reply, menu), where menu is the list of options to show under the reply, or None.
+    """
     started = time.time()
     history = load_history(sender)
+    option_names = set(OPTION_NAMES.values())
 
     # Include the previous farmer message so short follow-ups still retrieve well.
-    previous_user = [h["parts"][0] for h in history if h["role"] == "user"][-1:]
+    # Tapped options say nothing about the topic, so they are left out.
+    previous_user = [
+        h["parts"][0] for h in history if h["role"] == "user" and h["parts"][0] not in option_names
+    ][-1:]
     retrieval_query = " ".join(previous_user + [user_text])
 
     context = _retrieve_context(retrieval_query, top_k=4)
@@ -552,7 +715,13 @@ def generate_answer(
         if detected:
             touch_farmer(sender, detected)
             language_note += f" The message was detected as {detected}: reply in {detected}."
-    if recently_chatted:
+    if first_contact:
+        language_note += (
+            "\n\nFIRST CONTACT: This is the farmer's first ever message. Greet them warmly, say "
+            "once and briefly, in their language, that you are CoopIQ and work with our vet "
+            "team, then deal with their message."
+        )
+    elif recently_chatted:
         # Overrides the greeting rules in the system prompt for this turn.
         language_note += (
             "\n\nGREETING: This farmer already chatted with you in the last 24 hours. Do NOT "
@@ -562,7 +731,22 @@ def generate_answer(
             "sentence in their language and invite their next question, without introducing "
             "yourself again."
         )
-    language_note += "\n\n"
+    else:
+        language_note += (
+            "\n\nGREETING: You already know this farmer. A short greeting is fine, but do not "
+            "introduce yourself or say \"I am CoopIQ\"."
+        )
+    if not recently_chatted:
+        language_note += (
+            f"\n\nMENU: If the farmer's message is only a greeting or small talk, begin your "
+            f"reply with {GREETING_TAG} and then ask how you can help today, in their language. "
+            f"If it describes a problem or asks a question, do not use {GREETING_TAG}, just answer."
+        )
+    # Repeated here because older replies in the history may be long or use bullet points.
+    language_note += (
+        "\n\nSTYLE: 2 to 4 short lines of plain text, no bullets, no em or en dashes, and at "
+        "most one question.\n\n"
+    )
 
     turn = f"{notes}\n\n{channel}{language_note}FARMER'S MESSAGE:\n{user_text}"
 
@@ -574,7 +758,7 @@ def generate_answer(
         turn,
         generation_config={"temperature": 0.4, "max_output_tokens": 700},
     )
-    answer = response.text.strip()
+    answer = clean_reply(response.text.strip())
     logger.info(
         "Gemini replied in %.1fs (%d chars); total generate_answer %.1fs",
         time.time() - gemini_started,
@@ -582,33 +766,60 @@ def generate_answer(
         time.time() - started,
     )
 
-    # Store the plain message, not the injected notes, so history stays small.
-    append_history(sender, user_text, answer)
+    is_greeting = answer.startswith(GREETING_TAG)
+    answer = answer.replace(GREETING_TAG, "").strip()
+    if is_greeting and not recently_chatted:
+        answer = answer or WELCOME_REPLY
+        menu = MAIN_MENU
+    elif answer.endswith("?"):
+        menu = None  # the farmer needs to answer the question, so don't offer options
+    else:
+        menu = _menu_after_answer(history)
 
-    return answer
+    # Store the plain message, not the injected notes, so history stays small.
+    append_history(sender, user_text, with_options_marker(answer, menu))
+
+    return answer, menu
+
+
+def _menu_after_answer(history: list) -> list:
+    """Offer "Check another" if the farmer was checking an animal, otherwise "Ask another"."""
+    for turn in reversed(history):
+        if turn["role"] != "user":
+            continue
+        content = turn["parts"][0]
+        if content == OPTION_NAMES["check"] or content.startswith("[Photo of"):
+            return AFTER_CHECK_MENU
+        if content == OPTION_NAMES["ask"]:
+            return AFTER_ANSWER_MENU
+    return AFTER_ANSWER_MENU
 
 
 # ---------------------------------------------------------------------------
 # Photo diagnosis (mirrors the "diagnose" action of the Supabase edge function)
 # ---------------------------------------------------------------------------
-def _fallback_diagnosis_reply(condition: str, confidence: str, summary: str,
-                              recommendation: str, isolate: bool, escalate: bool) -> str:
+def _fallback_diagnosis_reply(condition: str, summary: str, recommendation: str,
+                              isolate: bool, escalate: bool) -> str:
     """English message built from the structured fields, used only if the model gave no reply."""
-    lines = [f"Likely condition: {condition} (confidence: {confidence})."]
+    if condition.lower().startswith("unclear"):
+        lines = ["I can't tell for sure from this photo."]
+    elif condition.lower().startswith("healthy"):
+        lines = ["I can't see clear signs of illness in this photo."]
+    else:
+        lines = [f"This could be {condition}, but a vet needs to confirm it."]
     if summary:
         lines.append(summary)
     if recommendation:
         lines.append(recommendation)
     if isolate:
-        lines.append("Separate the affected animals from the rest.")
+        lines.append("Keep the affected animals away from the others for now.")
     if escalate:
-        lines.append("Please contact a vet or vet soon.")
-    lines.append("This is a photo-based guide, not a laboratory result.")
+        lines.append(f"Please contact {VET_REFERENCE} as soon as you can.")
     return "\n\n".join(lines)
 
 
-def diagnose_image(sender: str, image: dict) -> str:
-    """Check a farmer's photo and return the WhatsApp reply text."""
+def diagnose_image(sender: str, image: dict) -> tuple:
+    """Check a farmer's photo. Returns (reply, menu), where menu may be None."""
     started = time.time()
     if not image.get("id"):
         raise ValueError("image message has no media id")
@@ -616,13 +827,13 @@ def diagnose_image(sender: str, image: dict) -> str:
     declared = (image.get("mime_type") or "").split(";")[0].strip().lower()
     if declared and declared not in IMAGE_MIMES:
         logger.info("Unsupported image type: %s", declared)
-        return UNSUPPORTED_IMAGE_REPLY
+        return UNSUPPORTED_IMAGE_REPLY, None
 
     data, media_mime = download_whatsapp_media(image["id"])
     mime = declared or (media_mime or "").split(";")[0].strip().lower() or "image/jpeg"
     if mime not in IMAGE_MIMES:
         logger.info("Unsupported image type after download: %s", mime)
-        return UNSUPPORTED_IMAGE_REPLY
+        return UNSUPPORTED_IMAGE_REPLY, None
 
     caption = (image.get("caption") or "").strip()[:MAX_CAPTION_CHARS]
 
@@ -630,9 +841,13 @@ def diagnose_image(sender: str, image: dict) -> str:
     image_row_id = save_image(sender, image["id"], data, mime, caption)
 
     history = load_history(sender)
+    # Tapped options are always in English, so they would mislead the language choice below.
+    option_names = set(OPTION_NAMES.values())
     recent_farmer = [
         h["parts"][0] for h in history
-        if h.get("role") == "user" and not h["parts"][0].startswith("[Photo of")
+        if h.get("role") == "user"
+        and not h["parts"][0].startswith("[Photo of")
+        and h["parts"][0] not in option_names
     ][-2:]
 
     # The subject is not known until the model has seen the photo, so retrieve broadly
@@ -713,27 +928,36 @@ def diagnose_image(sender: str, image: dict) -> str:
 
     reply = str(result.get("reply") or "").strip()
     if not reply:
-        reply = _fallback_diagnosis_reply(condition, confidence, summary, recommendation, isolate, escalate)
+        reply = _fallback_diagnosis_reply(condition, summary, recommendation, isolate, escalate)
+    reply = clean_reply(reply)
+
+    # A reply about a sick animal always offers the vet, even if it also asks for a better
+    # photo. A photo that isn't of an animal just needs a new photo, so it offers nothing.
+    show_menu = subject != "Other" and (escalate or not reply.endswith("?"))
+    menu = AFTER_CHECK_MENU if show_menu else None
 
     # Keep a plain-text record so follow-up questions about the photo make sense.
     note = f"[Photo of {subject}]"
     if caption:
         note = f"{note} {caption}"
-    append_history(sender, note, reply)
-    return reply
+    append_history(sender, note, with_options_marker(reply, menu))
+    return reply, menu
 
 
 # ---------------------------------------------------------------------------
 # WhatsApp Cloud API helpers
 # ---------------------------------------------------------------------------
-def send_whatsapp_message(to: str, body: str, phone_number_id: str = None) -> None:
-    """Send a text message.
+def send_whatsapp_message(to: str, body: str, phone_number_id: str = None, menu: list = None) -> None:
+    """Send a text message, with reply buttons if a menu is given.
 
     Replies go out from `phone_number_id` (the number that RECEIVED the message) when
     given, falling back to the PHONE_ID env var. This guarantees the reply appears in
     the same chat the farmer wrote in, even if PHONE_ID is misconfigured.
+
+    If WhatsApp rejects the buttons, the options are sent again as numbered text.
     """
     sender_id = phone_number_id or PHONE_ID
+    body = clean_reply(body)  # every outgoing message passes through here
     if not (WA_TOKEN and sender_id):
         logger.warning(
             "WA_TOKEN or phone number ID not configured (WA_TOKEN=%s sender_id=%s); "
@@ -749,12 +973,33 @@ def send_whatsapp_message(to: str, body: str, phone_number_id: str = None) -> No
         "Authorization": f"Bearer {WA_TOKEN}",
         "Content-Type": "application/json",
     }
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "text",
-        "text": {"body": body[:WHATSAPP_MAX_CHARS]},
-    }
+    if menu and len(body) > INTERACTIVE_BODY_MAX_CHARS:
+        # Too long to carry buttons: send the text first, then the buttons on their own.
+        send_whatsapp_message(to, body, sender_id)
+        body = MENU_PROMPT
+
+    payload = {"messaging_product": "whatsapp", "to": to}
+    if menu:
+        payload["type"] = "interactive"
+        payload["interactive"] = {
+            "type": "button",
+            "body": {"text": body},
+            "footer": {"text": MENU_FOOTER},
+            "action": {
+                "buttons": [
+                    {"type": "reply", "reply": {"id": option_id, "title": title}}
+                    for option_id, title in menu
+                ]
+            },
+        }
+    else:
+        payload["type"] = "text"
+        payload["text"] = {"body": body[:WHATSAPP_MAX_CHARS]}
+
+    def send_as_numbered_text():
+        options = "\n".join(title for _, title in menu)
+        send_whatsapp_message(to, f"{body}\n\n{options}\n\nReply with a number.", sender_id)
+
     logger.info(
         "Sending WhatsApp message to %s from phone_number_id=%s (%d chars)",
         _mask(to), sender_id, len(body),
@@ -763,6 +1008,8 @@ def send_whatsapp_message(to: str, body: str, phone_number_id: str = None) -> No
         resp = requests.post(url, headers=headers, json=payload, timeout=20)
     except requests.RequestException:
         logger.exception("WhatsApp send raised a network error")
+        if menu:
+            send_as_numbered_text()
         return
 
     if resp.status_code >= 300:
@@ -785,6 +1032,8 @@ def send_whatsapp_message(to: str, body: str, phone_number_id: str = None) -> No
                 "Dashboard 'Test' events use a dummy ID, so this is expected for those.",
                 sender_id,
             )
+        if menu:
+            send_as_numbered_text()
         return
 
     try:
@@ -853,6 +1102,32 @@ def transcribe_voice_note(audio: dict):
     except Exception:  # noqa: BLE001
         logger.exception("Voice note transcription failed")
         return None, None, None
+
+
+def extract_button_id(payload: dict):
+    """Return the id of a tapped reply button, or None if this message isn't a button tap."""
+    try:
+        message = payload["entry"][0]["changes"][0]["value"]["messages"][0]
+        return message["interactive"]["button_reply"]["id"]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+def menu_choice(payload: dict, sender: str, text: str):
+    """Return the option the farmer picked, by button tap or typed number, or None.
+
+    A typed number only counts if the bot's last message showed options, because "2" can
+    also be an answer, such as how many birds died.
+    """
+    button_id = extract_button_id(payload)
+    if button_id in OPTION_NAMES:
+        return button_id
+    match = re.fullmatch(r"\s*(\d)\s*[.)]?\s*", text or "")
+    if not match:
+        return None
+    options = options_in(load_last_reply(sender))
+    position = int(match.group(1)) - 1
+    return options[position] if 0 <= position < len(options) else None
 
 
 def extract_phone_number_id(payload: dict):
@@ -1079,18 +1354,20 @@ def handle_webhook():
         return jsonify({"status": "duplicate"}), 200
 
     # Read the previous last_seen BEFORE touch_farmer overwrites it with now.
-    recently_chatted = chatted_recently(get_last_seen(sender))
+    last_seen = get_last_seen(sender)
+    first_contact = last_seen is None
+    recently_chatted = chatted_recently(last_seen)
     touch_farmer(sender)
 
     # Photos: save them, run the disease check and reply.
     if image:
         logger.info("Photo received (caption=%s), running photo check", "yes" if image.get("caption") else "no")
         try:
-            reply = diagnose_image(sender, image)
+            reply, menu = diagnose_image(sender, image)
         except Exception:  # noqa: BLE001
             logger.exception("Photo check failed (model=%s)", GENERATION_MODEL)
-            reply = DIAGNOSE_FAILED_REPLY
-        send_whatsapp_message(sender, reply, reply_from)
+            reply, menu = DIAGNOSE_FAILED_REPLY, None
+        send_whatsapp_message(sender, reply, reply_from, menu)
         return jsonify({"status": "received"}), 200
 
     voice_confidence = None
@@ -1100,38 +1377,34 @@ def handle_webhook():
         text, voice_confidence, voice_language = transcribe_voice_note(audio)
         if not text:
             logger.warning("Voice note produced no transcript")
-            send_whatsapp_message(
-                sender,
-                "Sorry, I could not hear that voice note clearly. Please record it again "
-                "in a quieter place, or type your question.",
-                reply_from,
-            )
+            send_whatsapp_message(sender, VOICE_FAILED_REPLY, reply_from)
             return jsonify({"status": "received"}), 200
 
     if not text:
         logger.info("Unsupported message type; sending help text")
-        send_whatsapp_message(
-            sender,
-            "I can read text messages and voice notes, and check photos of sick birds, "
-            "droppings or animals. Please send your farming question or a photo and "
-            "I'll do my best to help!",
-            reply_from,
-        )
+        send_whatsapp_message(sender, UNSUPPORTED_MESSAGE_REPLY, reply_from)
+        return jsonify({"status": "received"}), 200
+
+    # Menu options get a fixed reply. A voice note is never treated as a menu choice.
+    choice = None if audio else menu_choice(payload, sender, text)
+    if choice:
+        logger.info("Menu option chosen: %s", choice)
+        reply = OPTION_REPLIES[choice]
+        append_history(sender, OPTION_NAMES[choice], reply)
+        send_whatsapp_message(sender, reply, reply_from)
         return jsonify({"status": "received"}), 200
 
     logger.info("Answering message from %s: %s", _mask(sender), text[:200])
     try:
-        answer = generate_answer(
-            sender, text, voice_confidence, voice_language, recently_chatted=recently_chatted
+        answer, menu = generate_answer(
+            sender, text, voice_confidence, voice_language,
+            recently_chatted=recently_chatted, first_contact=first_contact,
         )
     except Exception:  # noqa: BLE001
         logger.exception("Error generating answer (model=%s)", GENERATION_MODEL)
-        answer = (
-            "Sorry, I ran into a problem answering that just now. "
-            "Please try again in a moment."
-        )
+        answer, menu = ANSWER_FAILED_REPLY, None
 
-    send_whatsapp_message(sender, answer, reply_from)
+    send_whatsapp_message(sender, answer, reply_from, menu)
     return jsonify({"status": "received"}), 200
 
 

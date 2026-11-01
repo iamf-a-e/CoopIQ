@@ -126,5 +126,5 @@ def format_context(passages: List[dict]) -> str:
         return ""
     blocks = []
     for p in passages:
-        blocks.append(f"[{p['topic']} — {p['source']}]\n{p['text']}")
+        blocks.append(f"[{p['topic']}, source: {p['source']}]\n{p['text']}")
     return "\n\n".join(blocks)
