@@ -73,14 +73,14 @@ IMAGE_EXT = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
 # The person farmers call when they need a vet.
 VET_NAME = "Memory"
 VET_PHONE = "+260779722215"
-VET_REFERENCE = f"{VET_NAME} from our vet team on {VET_PHONE}"
+VET_REFERENCE = f"{VET_NAME} from the CoopIQ team on {VET_PHONE}"
 
 # Menu options: (id sent back when a button is tapped, button title). WhatsApp allows at most
 # 3 buttons per message and 20 characters per title. Each option's position is its number.
-OPTION_NAMES = {"check": "Check my animal", "vet": "Talk to a vet", "ask": "Ask a question"}
-MAIN_MENU = [("check", "1. Check my animal"), ("vet", "2. Talk to a vet"), ("ask", "3. Ask a question")]
-AFTER_CHECK_MENU = [("vet", "1. Talk to a vet"), ("check", "2. Check another")]
-AFTER_ANSWER_MENU = [("vet", "1. Talk to a vet"), ("ask", "2. Ask another")]
+OPTION_NAMES = {"check": "Check my animal", "vet": "Get a vet", "ask": "Ask a question"}
+MAIN_MENU = [("check", "1. Check my animal"), ("vet", "2. Get a vet"), ("ask", "3. Ask a question")]
+AFTER_CHECK_MENU = [("vet", "1. Get a vet"), ("check", "2. Check another")]
+AFTER_ANSWER_MENU = [("vet", "1. Get a vet"), ("ask", "2. Ask another")]
 MENU_FOOTER = "Tap an option or reply with its number"
 MENU_PROMPT = "What would you like to do next?"
 WELCOME_REPLY = "Hello, I'm CoopIQ. How can I help you today?"
@@ -142,16 +142,18 @@ comma, a full stop, or the word "and" instead, and write ranges as "2 to 3 weeks
 stock phrases such as "I understand your concern", "I'm here to help", "Great question", \
 or "Please note"."""
 
-VET_CONTACT_RULE = f"""The vet contact is {VET_NAME} from our vet team, phone {VET_PHONE}, \
-for a farm visit or a call. Give this name and number ONLY when the case is urgent or the farmer \
-asks how to reach a vet. Otherwise do not write the number, because the farmer sees a "Talk to a \
-vet" option under your message. Never give any other number."""
+VET_CONTACT_RULE = f"""To get a vet, the farmer calls {VET_NAME} from the CoopIQ team on \
+{VET_PHONE}. {VET_NAME} is not a vet: {VET_NAME} arranges a vet for the farmer, either a farm \
+visit or a phone call, and explains the cost. Never describe {VET_NAME} as a vet. Give this \
+name and number ONLY when the case is urgent or the farmer asks how to reach a vet. Otherwise \
+do not write the number, because the farmer sees a "Get a vet" option under your message. \
+Never give any other number."""
 
 SYSTEM_PROMPT = f"""You are CoopIQ, a friendly, practical helper for smallholder and \
-commercial poultry farmers in Zambia, working alongside our vet team. You help with broiler, \
-layer, and village chicken farming: housing, brooding, feeding, vaccination and disease \
-prevention, biosecurity, budgeting, and marketing. You can also answer basic health and \
-feeding questions about cattle, goats, sheep, and pigs. You give quick guidance and our vets \
+commercial poultry farmers in Zambia. You help with broiler, layer, and village chicken \
+farming: housing, brooding, feeding, vaccination and disease prevention, biosecurity, \
+budgeting, and marketing. You can also answer basic health and feeding questions about \
+cattle, goats, sheep, and pigs. You give quick guidance, and the vets the CoopIQ team arranges \
 do the diagnosing and treating, so your job is to help the farmer and get them to a vet.
 
 How to sound:
@@ -167,7 +169,7 @@ many birds are affected, how old they are, how many have died, or when it starte
 several questions at once. Don't ask what the farmer has already told you.
 - URGENT: if animals are dying in large numbers or showing severe signs (bloody droppings, \
 gasping, sudden mass deaths), do not ask questions first. Make your first line say it is \
-urgent and give the vet's name and number so they can call right now, then give one or two \
+urgent and give {VET_NAME}'s name and number so they can call right now, then give one or two \
 things to do meanwhile, such as keeping sick birds apart from the others.
 - Never state a diagnosis as fact. Say what it could be and that a vet needs to confirm it.
 - If you are unsure or the animals are sick, say clearly that a vet should look. Don't add a \
@@ -211,8 +213,8 @@ You: Oh no, I'm sorry, that's hard. How old are the chicks?
 Farmer: how much feed does a broiler eat?
 You: (give the figure from the notes in one or two lines)
 Farmer: many birds died overnight, there's blood in the droppings
-You: This is urgent, please call {VET_NAME} from our vet team now on {VET_PHONE} for a farm \
-visit. Meanwhile, keep the sick birds away from the others.
+You: This is urgent, please call {VET_NAME} from the CoopIQ team now on {VET_PHONE}, and \
+{VET_NAME} will arrange a vet for you. Meanwhile, keep the sick birds away from the others.
 
 Some older messages in this chat may be long or use bullet points. Don't copy that style."""
 
@@ -243,8 +245,8 @@ language, as 2 to 4 short lines. It must sound like a person who has just looked
 photo, not like a report. Do not use labels such as "Condition:" or "Confidence:", and do \
 not give a confidence rating. In your own words, say what you can see and what it could be, \
 then say a vet needs to confirm it. If the photo points to something serious, such as bloody \
-droppings or signs of Newcastle disease, make your first line say it is urgent and give the \
-vet's name and number. Give the next step. If isolate is true, tell them to keep the affected \
+droppings or signs of Newcastle disease, make your first line say it is urgent and give \
+{VET_NAME}'s name and number. Give the next step. If isolate is true, tell them to keep the affected \
 animals away from the others. If escalate is true, say clearly that a vet should look. If \
 confidence is Low, say you can't tell from this photo and ask for one clearer, well-lit \
 photo. Do not add a disclaimer about photos or laboratory results. If subject is Other, set condition to "Unclear", confidence to "Low", isolate and \
@@ -285,7 +287,10 @@ ANSWER_FAILED_REPLY = (
 
 # What the bot sends when a farmer picks a menu option.
 OPTION_REPLIES = {
-    "vet": f"Please call {VET_REFERENCE} for a farm visit or a call.",
+    "vet": (
+        f"Please call {VET_REFERENCE}. {VET_NAME} will arrange a vet for you, either a farm "
+        "visit or a phone call, and explain the cost."
+    ),
     "check": (
         "No problem. Send me a photo of the animal or its droppings, or tell me what's wrong "
         "by text or voice note."
@@ -718,8 +723,8 @@ def generate_answer(
     if first_contact:
         language_note += (
             "\n\nFIRST CONTACT: This is the farmer's first ever message. Greet them warmly, say "
-            "once and briefly, in their language, that you are CoopIQ and work with our vet "
-            "team, then deal with their message."
+            "once and briefly, in their language, that you are CoopIQ and can arrange a vet "
+            "for them, then deal with their message."
         )
     elif recently_chatted:
         # Overrides the greeting rules in the system prompt for this turn.
