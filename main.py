@@ -91,13 +91,15 @@ OPTION_NAMES = {
 MAIN_MENU = [("check", "1. Check my animal"), ("vet", "2. Get a vet"), ("medicine", "3. Buy medicine")]
 AFTER_CHECK_MENU = [("vet", "1. Get a vet"), ("check", "2. Check another")]
 AFTER_ANSWER_MENU = [("vet", "1. Get a vet"), ("ask", "2. Ask another")]
+URGENT_MENU = [("vet", "1. Get a vet")]  # a severe case: offer the button, don't dispatch unasked
 MENU_FOOTER = "Tap an option or reply with its number"
 FOLLOW_UP_FOOTER = "Tap an option, or just type your question"  # every menu after the opening one
 ASK_ANYTHING_LINE = "You can also ask me any farming question here."
 MENU_PROMPT = "What would you like to do next?"
 WELCOME_REPLY = "Hello, I'm CoopIQ. How can I help you today?"
 GREETING_TAG = "[GREETING]"
-URGENT_TAG = "[URGENT]"
+URGENT_TAG = "[URGENT]"  # a severe case: say so and offer the button, don't dispatch unasked
+VET_REQUEST_TAG = "[VETNOW]"  # the farmer explicitly asked for a vet: dispatch right away
 INTERACTIVE_BODY_MAX_CHARS = 1024  # WhatsApp's limit for a message with buttons
 
 # The static vet shown as "accepting" a dispatch request, for this demo.
@@ -176,11 +178,13 @@ comma, a full stop, or the word "and" instead, and write ranges as "2 to 3 weeks
 stock phrases such as "I understand your concern", "I'm here to help", "Great question", \
 or "Please note"."""
 
-VET_CONTACT_RULE = f"""Getting a vet is automatic: the farmer taps "Get a vet" or you flag the \
-case as urgent (see below), and the system requests one for them. Never write a phone number \
-or a person's name for this. The only exception is if the farmer explicitly asks for a direct \
-number to call themselves right now, for example "is there a number I can call": then, and \
-only then, give {VET_NAME} from the CoopIQ team on {VET_PHONE} as a backup. \
+VET_CONTACT_RULE = f"""The system requests a vet only when the farmer asks for one, by tapping \
+"Get a vet", typing its number, or clearly saying so in words (see below). Never request one \
+on your own just because a case looks severe, always wait for the farmer to ask, the \
+"Get a vet" option is offered to them for that. Never write a phone number or a person's name \
+for this. The only exception is if the farmer explicitly asks for a direct number to call \
+themselves right now, for example "is there a number I can call": then, and only then, give \
+{VET_NAME} from the CoopIQ team on {VET_PHONE} as a backup. \
 If the farmer asks where to buy medicine or wants it delivered, tell them to call \
 {MEDICINE_NAME} from the CoopIQ medicine team on {MEDICINE_PHONE}, who can deliver anywhere in \
 Zambia. Never give any other number."""
@@ -203,16 +207,20 @@ How to sound:
 - Use the conversation so far to understand what "it", "that", or "how often" refers to.
 
 How to help:
-- GET A VET: start your reply with {URGENT_TAG} and nothing before it, and do not ask any \
-questions first, in two cases. (1) Emergency: animals are dying in large numbers or showing \
-severe signs (bloody droppings, gasping, sudden mass deaths). After the tag, say it's urgent \
-and give one or two things to do right now, such as keeping the sick animals apart from the \
-others. (2) The farmer clearly says they want a vet, for example "I want a vet", "get me a \
-vet", "can I talk to a vet", even with no detail yet and even if you were about to ask them \
-something: after the tag, just say you're getting them one now, in one short line. In both \
-cases never give a phone number (see below) and never ask a question, the system requests a \
-vet automatically and the vet gets the details on the call. Never combine {URGENT_TAG} with \
-{GREETING_TAG}.
+- VET REQUESTED: if the farmer clearly says they want a vet, for example "I want a vet", \
+"get me a vet", "can I talk to a vet", start your reply with {VET_REQUEST_TAG} and nothing \
+before it, even with no detail yet and even if you were about to ask them something. After \
+the tag, just say you're getting them one now, in one short line. Never give a phone number, \
+the system dispatches a vet automatically and the vet gets the details on the call. Never \
+combine {VET_REQUEST_TAG} with {URGENT_TAG} or {GREETING_TAG}.
+- URGENT (but not yet requested): if animals are dying in large numbers or showing severe \
+signs (bloody droppings, gasping, sudden mass deaths) and the farmer has NOT asked for a vet \
+yet, do not ask questions and do not assume they want one dispatched. Start your reply with \
+{URGENT_TAG} and nothing before it, say it's urgent, give one or two things to do right now \
+such as keeping the sick animals apart from the others, and say a vet should see this. Never \
+give a phone number, the farmer is shown a "Get a vet" button to tap if they want one; do not \
+say it has been requested, because it hasn't yet. Never combine {URGENT_TAG} with \
+{VET_REQUEST_TAG} or {GREETING_TAG}.
 - Otherwise, if you need more information, ask ONE question and wait for the answer, for \
 example which animals, how many are affected, how old they are, how many have died, or when \
 it started. Never ask several questions at once. Don't ask what the farmer has already told you.
@@ -258,11 +266,12 @@ You: Oh no, I'm sorry, that's hard. How old are the chicks?
 Farmer: how much feed does a broiler eat?
 You: (give the figure from the notes in one or two lines)
 Farmer: many birds died overnight, there's blood in the droppings
-You: {URGENT_TAG} This is urgent. Keep the sick birds away from the others right now.
+You: {URGENT_TAG} This is urgent. Keep the sick birds away from the others right now, and a \
+vet should see them.
 Farmer: my goat isn't eating and seems weak
 You: Sorry to hear that. How long has it been off its food?
 Farmer: I want a vet
-You: {URGENT_TAG} Sure, requesting a vet for you now.
+You: {VET_REQUEST_TAG} Sure, requesting a vet for you now.
 
 Some older messages in this chat may be long or use bullet points. Don't copy that style."""
 
@@ -294,7 +303,8 @@ photo, not like a report. Do not use labels such as "Condition:" or "Confidence:
 not give a confidence rating. In your own words, say what you can see and what it could be, \
 then say a vet needs to confirm it. If the photo points to something serious, such as bloody \
 droppings or signs of Newcastle disease, make your first line say it is urgent. Never give a \
-phone number, the system requests a vet automatically when escalate is true. Give the next \
+phone number: when escalate is true the farmer is shown a "Get a vet" button to tap, the \
+system does not request one on its own. Give the next \
 step. If isolate is true, tell them to keep the affected \
 animals away from the others. If escalate is true, say clearly that a vet should look. If \
 confidence is Low, say you can't tell from this photo and ask for one clearer, well-lit \
@@ -825,8 +835,10 @@ def generate_answer(
 ) -> tuple:
     """Let Gemini handle the whole conversation, with retrieved notes as optional context.
 
-    Returns (reply, menu, urgent). menu is the list of options to show under the reply, or
-    None. urgent is True when the case needs a vet dispatched right away.
+    Returns (reply, menu, vet_requested). menu is the list of options to show under the
+    reply, or None. vet_requested is True only when the farmer explicitly asked for a vet, in
+    which case the caller should dispatch one right away; a severe case the farmer hasn't
+    asked about yet gets URGENT_MENU instead, so they choose to tap it.
     """
     started = time.time()
     history = load_history(sender)
@@ -916,12 +928,16 @@ def generate_answer(
         time.time() - started,
     )
 
+    vet_requested = answer.startswith(VET_REQUEST_TAG)
+    answer = answer.replace(VET_REQUEST_TAG, "").strip()
     urgent = answer.startswith(URGENT_TAG)
     answer = answer.replace(URGENT_TAG, "").strip()
     is_greeting = answer.startswith(GREETING_TAG)
     answer = answer.replace(GREETING_TAG, "").strip()
-    if urgent:
+    if vet_requested:
         menu = None  # a vet is being dispatched instead of offering options
+    elif urgent:
+        menu = URGENT_MENU  # a severe case: offer the button, wait for the farmer to tap it
     elif is_greeting:
         answer = answer or WELCOME_REPLY
         menu = MAIN_MENU  # always show the menu again for a bare greeting, not just first contact
@@ -933,7 +949,7 @@ def generate_answer(
     # Store the plain message, not the injected notes, so history stays small.
     append_history(sender, user_text, with_options_marker(answer, menu))
 
-    return answer, menu, urgent
+    return answer, menu, vet_requested
 
 
 def _menu_after_answer(history: list) -> list:
@@ -1085,10 +1101,10 @@ def diagnose_image(sender: str, image: dict) -> tuple:
         reply = _fallback_diagnosis_reply(condition, summary, recommendation, isolate, escalate)
     reply = clean_reply(reply)
 
-    # An escalated case gets a vet dispatched automatically (the caller does this), so no
-    # button is needed. Otherwise, a reply about a known animal still offers the vet, unless
-    # it's asking for a better photo. A photo that isn't of an animal offers nothing.
-    show_menu = not escalate and subject != "Other" and not reply.endswith("?")
+    # A known animal still offers the vet button, including an escalated case (the farmer
+    # taps it, it's never dispatched on its own), unless the reply is asking for a better
+    # photo. A photo that isn't of an animal offers nothing.
+    show_menu = subject != "Other" and not reply.endswith("?")
     menu = AFTER_CHECK_MENU if show_menu else None
 
     # Keep a plain-text record so follow-up questions about the photo make sense.
@@ -1551,7 +1567,9 @@ def handle_webhook():
                 append_history(sender, text, with_options_marker(reply, menu))
             return jsonify({"status": "received"}), 200
 
-    # Photos: save them, run the disease check and reply.
+    # Photos: save them, run the disease check and reply. An escalated case still just offers
+    # the "Get a vet" button (included in menu by diagnose_image); it's never dispatched on
+    # its own, only once the farmer actually taps it.
     if image:
         logger.info("Photo received (caption=%s), running photo check", "yes" if image.get("caption") else "no")
         try:
@@ -1559,9 +1577,8 @@ def handle_webhook():
         except Exception:  # noqa: BLE001
             logger.exception("Photo check failed (model=%s)", GENERATION_MODEL)
             reply, menu, escalate = DIAGNOSE_FAILED_REPLY, None, False
+        logger.info("Photo check escalate=%s (button offered, not auto-dispatched)", escalate)
         send_whatsapp_message(sender, reply, reply_from, menu)
-        if escalate:
-            dispatch_vet(sender, reply_from, "[Vet dispatch after photo check]")
         return jsonify({"status": "received"}), 200
 
     voice_confidence = None
@@ -1595,17 +1612,17 @@ def handle_webhook():
 
     logger.info("Answering message from %s: %s", _mask(sender), text[:200])
     try:
-        answer, menu, urgent = generate_answer(
+        answer, menu, vet_requested = generate_answer(
             sender, text, voice_confidence, voice_language,
             recently_chatted=recently_chatted, first_contact=first_contact,
         )
     except Exception:  # noqa: BLE001
         logger.exception("Error generating answer (model=%s)", GENERATION_MODEL)
-        answer, menu, urgent = ANSWER_FAILED_REPLY, None, False
+        answer, menu, vet_requested = ANSWER_FAILED_REPLY, None, False
 
     send_whatsapp_message(sender, answer, reply_from, menu)
-    if urgent:
-        dispatch_vet(sender, reply_from, "[Vet dispatch after urgent message]")
+    if vet_requested:
+        dispatch_vet(sender, reply_from, "[Vet dispatch after an explicit request]")
     return jsonify({"status": "received"}), 200
 
 
