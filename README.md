@@ -36,8 +36,27 @@ $env:GEN_API="your-gemini-api-key"
 $env:VERIFY_TOKEN="your-webhook-verify-token"
 ```
 
-The vet contact's name and number are set by `VET_NAME` and `VET_PHONE` at the
-top of `main.py`.
+The vet and medicine contacts' names and numbers are set by `VET_NAME`/`VET_PHONE`
+and `MEDICINE_NAME`/`MEDICINE_PHONE` at the top of `main.py`. "Get a vet" no
+longer gives this number directly: it runs a simulated dispatch (a static vet,
+`DISPATCH_VET_NAME`, "accepts" the request after `DISPATCH_DELAY_SECONDS`
+seconds). `VET_PHONE` is kept only as a backup if a farmer explicitly asks
+for a number to call themselves.
+
+First-contact intake (name, location, contact phone) is stored on the
+`farmers` table. If Supabase is enabled, add these columns once:
+
+```sql
+alter table farmers add column if not exists name text;
+alter table farmers add column if not exists location text;
+alter table farmers add column if not exists contact_phone text;
+alter table farmers add column if not exists intake_step text;
+```
+
+Without these columns, intake answers aren't saved, so farmers get asked
+again on every message. Without Supabase at all, intake works for the life
+of one running process, but resets on every cold start, same as chat
+history.
 
 ## Build the knowledge base embeddings
 

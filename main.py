@@ -97,7 +97,24 @@ ASK_ANYTHING_LINE = "You can also ask me any farming question here."
 MENU_PROMPT = "What would you like to do next?"
 WELCOME_REPLY = "Hello, I'm CoopIQ. How can I help you today?"
 GREETING_TAG = "[GREETING]"
+URGENT_TAG = "[URGENT]"
 INTERACTIVE_BODY_MAX_CHARS = 1024  # WhatsApp's limit for a message with buttons
+
+# The static vet shown as "accepting" a dispatch request, for this demo.
+DISPATCH_VET_NAME = "Dr Bwalya Mulenga"
+DISPATCH_DELAY_SECONDS = float(os.environ.get("DISPATCH_DELAY_SECONDS", "4"))
+DISPATCH_REQUESTING_REPLY = "Requesting a vet for you now..."
+DISPATCH_ACCEPTED_REPLY = (
+    f"Request accepted. {DISPATCH_VET_NAME} will call you shortly to arrange a farm visit "
+    "or phone consultation."
+)
+
+# Intake: asked once, before the opening menu, on a farmer's first-ever text message.
+INTAKE_NAME_QUESTION = "Hello, I'm CoopIQ. Before we start, what's your name?"
+INTAKE_LOCATION_QUESTION = "Which area or town are you farming in?"
+INTAKE_PHONE_QUESTION = "What's the best phone number for a vet to call you on?"
+INTAKE_PHONE_RETRY = "That doesn't look like a phone number. Could you send it again?"
+_PHONE_PATTERN = re.compile(r"^[+\d][\d\s().-]{6,19}$")
 
 if GEN_API:
     genai.configure(api_key=GEN_API)
@@ -154,11 +171,11 @@ comma, a full stop, or the word "and" instead, and write ranges as "2 to 3 weeks
 stock phrases such as "I understand your concern", "I'm here to help", "Great question", \
 or "Please note"."""
 
-VET_CONTACT_RULE = f"""To get a vet, the farmer calls {VET_NAME} from the CoopIQ team on \
-{VET_PHONE}. {VET_NAME} is not a vet: {VET_NAME} arranges a vet for the farmer, either a farm \
-visit or a phone call, and explains the cost. Never describe {VET_NAME} as a vet. Give this \
-name and number ONLY when the case is urgent or the farmer asks how to reach a vet. Otherwise \
-do not write the number, because the farmer sees a "Get a vet" option under your message. \
+VET_CONTACT_RULE = f"""Getting a vet is automatic: the farmer taps "Get a vet" or you flag the \
+case as urgent (see below), and the system requests one for them. Never write a phone number \
+or a person's name for this. The only exception is if the farmer explicitly asks for a direct \
+number to call themselves right now, for example "is there a number I can call": then, and \
+only then, give {VET_NAME} from the CoopIQ team on {VET_PHONE} as a backup. \
 If the farmer asks where to buy medicine or wants it delivered, tell them to call \
 {MEDICINE_NAME} from the CoopIQ medicine team on {MEDICINE_PHONE}, who can deliver anywhere in \
 Zambia. Never give any other number."""
@@ -182,9 +199,10 @@ How to help:
 many birds are affected, how old they are, how many have died, or when it started. Never ask \
 several questions at once. Don't ask what the farmer has already told you.
 - URGENT: if animals are dying in large numbers or showing severe signs (bloody droppings, \
-gasping, sudden mass deaths), do not ask questions first. Make your first line say it is \
-urgent and give {VET_NAME}'s name and number so they can call right now, then give one or two \
-things to do meanwhile, such as keeping sick birds apart from the others.
+gasping, sudden mass deaths), do not ask questions first. Start your reply with {URGENT_TAG} \
+and nothing before it, then one short line saying it's urgent and one or two things to do \
+right now, such as keeping sick birds apart from the others. Never give a phone number here \
+(see below), the system requests a vet automatically. Never combine {URGENT_TAG} with {GREETING_TAG}.
 - Never state a diagnosis as fact. Say what it could be and that a vet needs to confirm it.
 - If you are unsure or the animals are sick, say clearly that a vet should look. Don't add a \
 vet mention to routine answers. {VET_CONTACT_RULE}
@@ -227,8 +245,7 @@ You: Oh no, I'm sorry, that's hard. How old are the chicks?
 Farmer: how much feed does a broiler eat?
 You: (give the figure from the notes in one or two lines)
 Farmer: many birds died overnight, there's blood in the droppings
-You: This is urgent, please call {VET_NAME} from the CoopIQ team now on {VET_PHONE}, and \
-{VET_NAME} will arrange a vet for you. Meanwhile, keep the sick birds away from the others.
+You: {URGENT_TAG} This is urgent. Keep the sick birds away from the others right now.
 
 Some older messages in this chat may be long or use bullet points. Don't copy that style."""
 
@@ -259,8 +276,9 @@ language, as 2 to 4 short lines. It must sound like a person who has just looked
 photo, not like a report. Do not use labels such as "Condition:" or "Confidence:", and do \
 not give a confidence rating. In your own words, say what you can see and what it could be, \
 then say a vet needs to confirm it. If the photo points to something serious, such as bloody \
-droppings or signs of Newcastle disease, make your first line say it is urgent and give \
-{VET_NAME}'s name and number. Give the next step. If isolate is true, tell them to keep the affected \
+droppings or signs of Newcastle disease, make your first line say it is urgent. Never give a \
+phone number, the system requests a vet automatically when escalate is true. Give the next \
+step. If isolate is true, tell them to keep the affected \
 animals away from the others. If escalate is true, say clearly that a vet should look. If \
 confidence is Low, say you can't tell from this photo and ask for one clearer, well-lit \
 photo. Do not add a disclaimer about photos or laboratory results. If subject is Other, set condition to "Unclear", confidence to "Low", isolate and \
@@ -299,15 +317,9 @@ ANSWER_FAILED_REPLY = (
     f"If your animals are really sick, don't wait, please contact {VET_REFERENCE}."
 )
 
-# What the bot sends when a farmer picks a menu option.
+# What the bot sends when a farmer picks a menu option. "vet" is handled separately (it
+# dispatches a vet instead of sending a fixed reply) and has no entry here.
 OPTION_REPLIES = {
-    "vet": (
-        f"Please call {VET_REFERENCE}.\n\n"
-        f"{VET_NAME} will arrange a vet to help you, at your farm or over the phone. The vet "
-        "will find out what's wrong and recommend the right treatment or medicine for your "
-        f"animals. {VET_NAME} will explain the cost when you call.\n\n"
-        f"{ASK_ANYTHING_LINE}"
-    ),
     "check": (
         "No problem. Send me a photo of the animal or its droppings, or tell me what's wrong "
         "by text or voice note."
@@ -531,6 +543,74 @@ def touch_farmer(sender: str, language: str = None) -> None:
         state["last_language"] = language
 
 
+# Columns used for the first-contact intake (name, location, contact_phone, intake_step).
+# If Supabase is enabled, these must exist on the farmers table, for example:
+#   alter table farmers add column if not exists name text;
+#   alter table farmers add column if not exists location text;
+#   alter table farmers add column if not exists contact_phone text;
+#   alter table farmers add column if not exists intake_step text;
+# Until they're added, these calls fail silently (like the rest of this file's Supabase calls)
+# and intake falls back to asking again each time, rather than crashing the bot.
+_PROFILE_FIELDS = ("name", "location", "contact_phone", "intake_step")
+
+
+def get_farmer_profile(sender: str) -> dict:
+    """Return {"name", "location", "contact_phone", "intake_step"}, each None if unknown."""
+    empty = {field: None for field in _PROFILE_FIELDS}
+    if _supabase_enabled():
+        try:
+            rows = _sb(
+                "GET",
+                "farmers",
+                params={"select": ",".join(_PROFILE_FIELDS), "phone": f"eq.{sender}", "limit": "1"},
+            ) or []
+            return {**empty, **rows[0]} if rows else empty
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to load farmer profile (columns may be missing)")
+            return empty
+    return {**empty, **{k: v for k, v in _local_farmers.get(sender, {}).items() if k in _PROFILE_FIELDS}}
+
+
+def save_farmer_profile(sender: str, **fields) -> None:
+    """Merge the given profile fields (name, location, contact_phone, intake_step) in."""
+    if _supabase_enabled():
+        try:
+            _sb(
+                "POST",
+                "farmers",
+                params={"on_conflict": "phone"},
+                body={"phone": sender, **fields},
+                prefer="resolution=merge-duplicates,return=minimal",
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to save farmer profile (columns may be missing)")
+        return
+    _local_farmers.setdefault(sender, {}).update(fields)
+
+
+def advance_intake(sender: str, step: str, text: str) -> tuple:
+    """Advance the one-time, first-contact intake by one step.
+
+    step is None to start it. Returns (reply, menu); menu is MAIN_MENU only once intake is
+    done, so the caller can send it straight to the farmer and return, same as any other reply.
+    """
+    text = (text or "").strip()
+    if step is None:
+        save_farmer_profile(sender, intake_step="name")
+        return INTAKE_NAME_QUESTION, None
+    if step == "name":
+        save_farmer_profile(sender, name=text[:80] or "there", intake_step="location")
+        return INTAKE_LOCATION_QUESTION, None
+    if step == "location":
+        save_farmer_profile(sender, location=text[:120], intake_step="phone")
+        return INTAKE_PHONE_QUESTION, None
+    # step == "phone"
+    if not _PHONE_PATTERN.match(text):
+        return INTAKE_PHONE_RETRY, None
+    save_farmer_profile(sender, contact_phone=text[:30], intake_step="done")
+    return WELCOME_REPLY, MAIN_MENU
+
+
 def _parse_ts(value):
     """Parse a Postgres/ISO timestamp into an aware datetime, or None if it can't be read."""
     if not value:
@@ -710,7 +790,8 @@ def generate_answer(
 ) -> tuple:
     """Let Gemini handle the whole conversation, with retrieved notes as optional context.
 
-    Returns (reply, menu), where menu is the list of options to show under the reply, or None.
+    Returns (reply, menu, urgent). menu is the list of options to show under the reply, or
+    None. urgent is True when the case needs a vet dispatched right away.
     """
     started = time.time()
     history = load_history(sender)
@@ -797,9 +878,13 @@ def generate_answer(
         time.time() - started,
     )
 
+    urgent = answer.startswith(URGENT_TAG)
+    answer = answer.replace(URGENT_TAG, "").strip()
     is_greeting = answer.startswith(GREETING_TAG)
     answer = answer.replace(GREETING_TAG, "").strip()
-    if is_greeting and not recently_chatted:
+    if urgent:
+        menu = None  # a vet is being dispatched instead of offering options
+    elif is_greeting and not recently_chatted:
         answer = answer or WELCOME_REPLY
         menu = MAIN_MENU
     elif answer.endswith("?"):
@@ -810,7 +895,7 @@ def generate_answer(
     # Store the plain message, not the injected notes, so history stays small.
     append_history(sender, user_text, with_options_marker(answer, menu))
 
-    return answer, menu
+    return answer, menu, urgent
 
 
 def _menu_after_answer(history: list) -> list:
@@ -850,7 +935,7 @@ def _fallback_diagnosis_reply(condition: str, summary: str, recommendation: str,
 
 
 def diagnose_image(sender: str, image: dict) -> tuple:
-    """Check a farmer's photo. Returns (reply, menu), where menu may be None."""
+    """Check a farmer's photo. Returns (reply, menu, escalate); menu may be None."""
     started = time.time()
     if not image.get("id"):
         raise ValueError("image message has no media id")
@@ -858,13 +943,13 @@ def diagnose_image(sender: str, image: dict) -> tuple:
     declared = (image.get("mime_type") or "").split(";")[0].strip().lower()
     if declared and declared not in IMAGE_MIMES:
         logger.info("Unsupported image type: %s", declared)
-        return UNSUPPORTED_IMAGE_REPLY, None
+        return UNSUPPORTED_IMAGE_REPLY, None, False
 
     data, media_mime = download_whatsapp_media(image["id"])
     mime = declared or (media_mime or "").split(";")[0].strip().lower() or "image/jpeg"
     if mime not in IMAGE_MIMES:
         logger.info("Unsupported image type after download: %s", mime)
-        return UNSUPPORTED_IMAGE_REPLY, None
+        return UNSUPPORTED_IMAGE_REPLY, None, False
 
     caption = (image.get("caption") or "").strip()[:MAX_CAPTION_CHARS]
 
@@ -962,9 +1047,10 @@ def diagnose_image(sender: str, image: dict) -> tuple:
         reply = _fallback_diagnosis_reply(condition, summary, recommendation, isolate, escalate)
     reply = clean_reply(reply)
 
-    # A reply about a sick animal always offers the vet, even if it also asks for a better
-    # photo. A photo that isn't of an animal just needs a new photo, so it offers nothing.
-    show_menu = subject != "Other" and (escalate or not reply.endswith("?"))
+    # An escalated case gets a vet dispatched automatically (the caller does this), so no
+    # button is needed. Otherwise, a reply about a known animal still offers the vet, unless
+    # it's asking for a better photo. A photo that isn't of an animal offers nothing.
+    show_menu = not escalate and subject != "Other" and not reply.endswith("?")
     menu = AFTER_CHECK_MENU if show_menu else None
 
     # Keep a plain-text record so follow-up questions about the photo make sense.
@@ -972,7 +1058,7 @@ def diagnose_image(sender: str, image: dict) -> tuple:
     if caption:
         note = f"{note} {caption}"
     append_history(sender, note, with_options_marker(reply, menu))
-    return reply, menu
+    return reply, menu, escalate
 
 
 # ---------------------------------------------------------------------------
@@ -1355,6 +1441,18 @@ def verify_webhook():
     return "Verification failed", 403
 
 
+def dispatch_vet(sender: str, reply_from: str, user_note: str) -> None:
+    """Send the "requesting a vet... request accepted" sequence and record it in history.
+
+    Blocks for DISPATCH_DELAY_SECONDS between the two messages. That's fine for a single
+    webhook request, but means this request takes a few seconds longer to finish.
+    """
+    send_whatsapp_message(sender, DISPATCH_REQUESTING_REPLY, reply_from)
+    time.sleep(DISPATCH_DELAY_SECONDS)
+    send_whatsapp_message(sender, DISPATCH_ACCEPTED_REPLY, reply_from)
+    append_history(sender, user_note, f"{DISPATCH_REQUESTING_REPLY}\n\n{DISPATCH_ACCEPTED_REPLY}")
+
+
 @app.route("/webhook", methods=["POST"])
 def handle_webhook():
     payload = request.get_json(silent=True) or {}
@@ -1393,15 +1491,33 @@ def handle_webhook():
     recently_chatted = chatted_recently(last_seen)
     touch_farmer(sender)
 
+    # Intake (name, location, contact phone) runs once, on a brand-new farmer's first-ever
+    # TEXT message, before anything else. If their first message is a photo or voice note
+    # instead, intake is skipped for now and simply never starts (a known limitation).
+    is_text_message = text is not None and audio is None and image is None
+    if is_text_message:
+        profile = get_farmer_profile(sender)
+        step = profile.get("intake_step")
+        if step in ("name", "location", "phone") or (step is None and first_contact):
+            reply, menu = advance_intake(sender, step, text)
+            send_whatsapp_message(sender, reply, reply_from, menu)
+            if menu:
+                # Only the finishing step returns a menu; record it so a typed number for
+                # the opening menu is recognised on the farmer's very next message.
+                append_history(sender, text, with_options_marker(reply, menu))
+            return jsonify({"status": "received"}), 200
+
     # Photos: save them, run the disease check and reply.
     if image:
         logger.info("Photo received (caption=%s), running photo check", "yes" if image.get("caption") else "no")
         try:
-            reply, menu = diagnose_image(sender, image)
+            reply, menu, escalate = diagnose_image(sender, image)
         except Exception:  # noqa: BLE001
             logger.exception("Photo check failed (model=%s)", GENERATION_MODEL)
-            reply, menu = DIAGNOSE_FAILED_REPLY, None
+            reply, menu, escalate = DIAGNOSE_FAILED_REPLY, None, False
         send_whatsapp_message(sender, reply, reply_from, menu)
+        if escalate:
+            dispatch_vet(sender, reply_from, "[Vet dispatch after photo check]")
         return jsonify({"status": "received"}), 200
 
     voice_confidence = None
@@ -1419,8 +1535,13 @@ def handle_webhook():
         send_whatsapp_message(sender, UNSUPPORTED_MESSAGE_REPLY, reply_from)
         return jsonify({"status": "received"}), 200
 
-    # Menu options get a fixed reply. A voice note is never treated as a menu choice.
+    # Menu options get a fixed reply, except "vet", which dispatches one. A voice note is
+    # never treated as a menu choice.
     choice = None if audio else menu_choice(payload, sender, text)
+    if choice == "vet":
+        logger.info("Menu option chosen: vet (dispatching)")
+        dispatch_vet(sender, reply_from, OPTION_NAMES["vet"])
+        return jsonify({"status": "received"}), 200
     if choice:
         logger.info("Menu option chosen: %s", choice)
         reply = OPTION_REPLIES[choice]
@@ -1430,15 +1551,17 @@ def handle_webhook():
 
     logger.info("Answering message from %s: %s", _mask(sender), text[:200])
     try:
-        answer, menu = generate_answer(
+        answer, menu, urgent = generate_answer(
             sender, text, voice_confidence, voice_language,
             recently_chatted=recently_chatted, first_contact=first_contact,
         )
     except Exception:  # noqa: BLE001
         logger.exception("Error generating answer (model=%s)", GENERATION_MODEL)
-        answer, menu = ANSWER_FAILED_REPLY, None
+        answer, menu, urgent = ANSWER_FAILED_REPLY, None, False
 
     send_whatsapp_message(sender, answer, reply_from, menu)
+    if urgent:
+        dispatch_vet(sender, reply_from, "[Vet dispatch after urgent message]")
     return jsonify({"status": "received"}), 200
 
 
