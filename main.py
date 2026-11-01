@@ -288,14 +288,19 @@ ANSWER_FAILED_REPLY = (
 # What the bot sends when a farmer picks a menu option.
 OPTION_REPLIES = {
     "vet": (
-        f"Please call {VET_REFERENCE}. {VET_NAME} will arrange a vet for you, either a farm "
-        "visit or a phone call, and explain the cost."
+        f"Please call {VET_REFERENCE}.\n\n"
+        f"{VET_NAME} will arrange a vet to help you, at your farm or over the phone. The vet "
+        "will find out what's wrong and recommend the right treatment or medicine for your "
+        f"animals. {VET_NAME} will explain the cost when you call."
     ),
     "check": (
         "No problem. Send me a photo of the animal or its droppings, or tell me what's wrong "
         "by text or voice note."
     ),
-    "ask": "Sure, what would you like to know?",
+    "ask": (
+        "Sure. You can ask me about feeding, vaccination, housing, keeping your animals healthy, "
+        "costs or selling your birds. What would you like to know?"
+    ),
 }
 
 
