@@ -186,11 +186,14 @@ If the farmer asks where to buy medicine or wants it delivered, tell them to cal
 Zambia. Never give any other number."""
 
 SYSTEM_PROMPT = f"""You are CoopIQ, a friendly, practical helper for smallholder and \
-commercial poultry farmers in Zambia. You help with broiler, layer, and village chicken \
-farming: housing, brooding, feeding, vaccination and disease prevention, biosecurity, \
-budgeting, and marketing. You can also answer basic health and feeding questions about \
-cattle, goats, sheep, and pigs. You give quick guidance, and the vets the CoopIQ team arranges \
-do the diagnosing and treating, so your job is to help the farmer and get them to a vet.
+commercial farmers in Zambia, covering poultry AND livestock equally: broiler, layer and \
+village chicken farming, and cattle, goats, sheep and pigs. For poultry this covers housing, \
+brooding, feeding, vaccination and disease prevention, biosecurity, budgeting, and marketing. \
+For other livestock you answer basic health and feeding questions. Don't assume a farmer \
+keeps chickens. If an earlier message named the animal, use that word. If not, ask or use a \
+general word like "animals", never default to "birds" or "chicks". You give quick guidance, \
+and the vets the CoopIQ team arranges do the diagnosing and treating, so your job is to help \
+the farmer and get them to a vet.
 
 How to sound:
 - {STYLE_RULE}
@@ -200,13 +203,13 @@ How to sound:
 - Use the conversation so far to understand what "it", "that", or "how often" refers to.
 
 How to help:
-- If you need more information, ask ONE question and wait for the answer, for example how \
-many birds are affected, how old they are, how many have died, or when it started. Never ask \
-several questions at once. Don't ask what the farmer has already told you.
+- If you need more information, ask ONE question and wait for the answer, for example which \
+animals, how many are affected, how old they are, how many have died, or when it started. \
+Never ask several questions at once. Don't ask what the farmer has already told you.
 - URGENT: if animals are dying in large numbers or showing severe signs (bloody droppings, \
 gasping, sudden mass deaths), do not ask questions first. Start your reply with {URGENT_TAG} \
 and nothing before it, then one short line saying it's urgent and one or two things to do \
-right now, such as keeping sick birds apart from the others. Never give a phone number here \
+right now, such as keeping the sick animals apart from the others. Never give a phone number here \
 (see below), the system requests a vet automatically. Never combine {URGENT_TAG} with {GREETING_TAG}.
 - Never state a diagnosis as fact. Say what it could be and that a vet needs to confirm it.
 - If you are unsure or the animals are sick, say clearly that a vet should look. Don't add a \
@@ -251,6 +254,8 @@ Farmer: how much feed does a broiler eat?
 You: (give the figure from the notes in one or two lines)
 Farmer: many birds died overnight, there's blood in the droppings
 You: {URGENT_TAG} This is urgent. Keep the sick birds away from the others right now.
+Farmer: my goat isn't eating and seems weak
+You: Sorry to hear that. How long has it been off its food?
 
 Some older messages in this chat may be long or use bullet points. Don't copy that style."""
 
@@ -287,8 +292,8 @@ step. If isolate is true, tell them to keep the affected \
 animals away from the others. If escalate is true, say clearly that a vet should look. If \
 confidence is Low, say you can't tell from this photo and ask for one clearer, well-lit \
 photo. Do not add a disclaimer about photos or laboratory results. If subject is Other, set condition to "Unclear", confidence to "Low", isolate and \
-escalate to false, and make reply kindly ask for a clear, well-lit photo of the sick bird, \
-its droppings, or the animal.
+escalate to false, and make reply kindly ask for a clear, well-lit photo of the sick animal \
+or its droppings.
 
 {STYLE_RULE}
 
@@ -302,8 +307,8 @@ farmer's caption if there is one. If there is no caption, use the language of th
 recent messages. If neither exists, use English."""
 
 UNSUPPORTED_IMAGE_REPLY = (
-    "I can't open that type of file. Could you take a photo of the bird, droppings or "
-    "animal and send it as a normal picture?"
+    "I can't open that type of file. Could you take a photo of the sick animal or its "
+    "droppings and send it as a normal picture?"
 )
 DIAGNOSE_FAILED_REPLY = (
     "Sorry, I couldn't check that photo just now. Please send it again in a minute. "
@@ -315,7 +320,7 @@ VOICE_FAILED_REPLY = (
 )
 UNSUPPORTED_MESSAGE_REPLY = (
     "I can't read that kind of message, but you can type to me, send a voice note, or send "
-    "a photo of a sick bird, droppings or animal. What's going on with your animals?"
+    "a photo of a sick animal or its droppings. What's going on?"
 )
 ANSWER_FAILED_REPLY = (
     "Sorry, something went wrong on my side. Please send that again in a minute. "
@@ -331,7 +336,7 @@ OPTION_REPLIES = {
     ),
     "ask": (
         "Sure. You can ask me about feeding, vaccination, housing, keeping your animals healthy, "
-        "costs or selling your birds. What would you like to know?"
+        "costs or selling your animals. What would you like to know?"
     ),
     "medicine": (
         f"Please call {MEDICINE_REFERENCE}.\n\n"
@@ -554,14 +559,17 @@ def touch_farmer(sender: str, language: str = None) -> None:
 #   alter table farmers add column if not exists location text;
 #   alter table farmers add column if not exists contact_phone text;
 #   alter table farmers add column if not exists intake_step text;
-# Until they're added, these calls fail silently (like the rest of this file's Supabase calls)
-# and intake falls back to asking again each time, rather than crashing the bot.
+# Until they're added, Supabase calls for these fields fail (like other Supabase calls in this
+# file, they're caught and logged, not raised). Writes also go to the in-memory dict below as a
+# backup, and reads fall back to it, so intake can still get through one warm instance even
+# before the columns exist, though it won't survive a cold start without them.
 _PROFILE_FIELDS = ("name", "location", "contact_phone", "intake_step")
 
 
 def get_farmer_profile(sender: str) -> dict:
     """Return {"name", "location", "contact_phone", "intake_step"}, each None if unknown."""
     empty = {field: None for field in _PROFILE_FIELDS}
+    local = {k: v for k, v in _local_farmers.get(sender, {}).items() if k in _PROFILE_FIELDS}
     if _supabase_enabled():
         try:
             rows = _sb(
@@ -569,15 +577,16 @@ def get_farmer_profile(sender: str) -> dict:
                 "farmers",
                 params={"select": ",".join(_PROFILE_FIELDS), "phone": f"eq.{sender}", "limit": "1"},
             ) or []
-            return {**empty, **rows[0]} if rows else empty
+            return {**empty, **local, **rows[0]} if rows else {**empty, **local}
         except Exception:  # noqa: BLE001
             logger.exception("Failed to load farmer profile (columns may be missing)")
-            return empty
-    return {**empty, **{k: v for k, v in _local_farmers.get(sender, {}).items() if k in _PROFILE_FIELDS}}
+            return {**empty, **local}
+    return {**empty, **local}
 
 
 def save_farmer_profile(sender: str, **fields) -> None:
     """Merge the given profile fields (name, location, contact_phone, intake_step) in."""
+    _local_farmers.setdefault(sender, {}).update(fields)  # backup, kept in sync either way
     if _supabase_enabled():
         try:
             _sb(
@@ -589,13 +598,13 @@ def save_farmer_profile(sender: str, **fields) -> None:
             )
         except Exception:  # noqa: BLE001
             logger.exception("Failed to save farmer profile (columns may be missing)")
-        return
-    _local_farmers.setdefault(sender, {}).update(fields)
 
 
 def reset_farmer(sender: str) -> None:
     """Wipe a farmer's saved profile, intake progress and chat history, so their next message
     is treated as first contact again. Used for the "clear" keyword."""
+    _local_farmers.pop(sender, None)  # the backup kept by save_farmer_profile, cleared either way
+    _local_history.pop(sender, None)
     if _supabase_enabled():
         try:
             _sb("DELETE", "farmers", params={"phone": f"eq.{sender}"}, prefer="return=minimal")
@@ -605,9 +614,6 @@ def reset_farmer(sender: str) -> None:
             _sb("DELETE", "chat_messages", params={"sender": f"eq.{sender}"}, prefer="return=minimal")
         except Exception:  # noqa: BLE001
             logger.exception("Failed to delete chat history during reset")
-        return
-    _local_farmers.pop(sender, None)
-    _local_history.pop(sender, None)
 
 
 def advance_intake(sender: str, step: str, text: str) -> tuple:
@@ -1259,7 +1265,7 @@ def menu_choice(payload: dict, sender: str, text: str):
     """Return the option the farmer picked, by button tap or typed number, or None.
 
     A typed number only counts if the bot's last message showed options, because "2" can
-    also be an answer, such as how many birds died.
+    also be an answer, such as how many animals died.
     """
     button_id = extract_button_id(payload)
     if button_id in OPTION_NAMES:
