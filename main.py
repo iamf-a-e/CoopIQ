@@ -203,14 +203,19 @@ How to sound:
 - Use the conversation so far to understand what "it", "that", or "how often" refers to.
 
 How to help:
-- If you need more information, ask ONE question and wait for the answer, for example which \
-animals, how many are affected, how old they are, how many have died, or when it started. \
-Never ask several questions at once. Don't ask what the farmer has already told you.
-- URGENT: if animals are dying in large numbers or showing severe signs (bloody droppings, \
-gasping, sudden mass deaths), do not ask questions first. Start your reply with {URGENT_TAG} \
-and nothing before it, then one short line saying it's urgent and one or two things to do \
-right now, such as keeping the sick animals apart from the others. Never give a phone number here \
-(see below), the system requests a vet automatically. Never combine {URGENT_TAG} with {GREETING_TAG}.
+- GET A VET: start your reply with {URGENT_TAG} and nothing before it, and do not ask any \
+questions first, in two cases. (1) Emergency: animals are dying in large numbers or showing \
+severe signs (bloody droppings, gasping, sudden mass deaths). After the tag, say it's urgent \
+and give one or two things to do right now, such as keeping the sick animals apart from the \
+others. (2) The farmer clearly says they want a vet, for example "I want a vet", "get me a \
+vet", "can I talk to a vet", even with no detail yet and even if you were about to ask them \
+something: after the tag, just say you're getting them one now, in one short line. In both \
+cases never give a phone number (see below) and never ask a question, the system requests a \
+vet automatically and the vet gets the details on the call. Never combine {URGENT_TAG} with \
+{GREETING_TAG}.
+- Otherwise, if you need more information, ask ONE question and wait for the answer, for \
+example which animals, how many are affected, how old they are, how many have died, or when \
+it started. Never ask several questions at once. Don't ask what the farmer has already told you.
 - Never state a diagnosis as fact. Say what it could be and that a vet needs to confirm it.
 - If you are unsure or the animals are sick, say clearly that a vet should look. Don't add a \
 vet mention to routine answers. {VET_CONTACT_RULE}
@@ -256,6 +261,8 @@ Farmer: many birds died overnight, there's blood in the droppings
 You: {URGENT_TAG} This is urgent. Keep the sick birds away from the others right now.
 Farmer: my goat isn't eating and seems weak
 You: Sorry to hear that. How long has it been off its food?
+Farmer: I want a vet
+You: {URGENT_TAG} Sure, requesting a vet for you now.
 
 Some older messages in this chat may be long or use bullet points. Don't copy that style."""
 
@@ -876,12 +883,15 @@ def generate_answer(
             "\n\nGREETING: You already know this farmer. A short greeting is fine, but do not "
             "introduce yourself or say \"I am CoopIQ\"."
         )
-    if not recently_chatted:
-        language_note += (
-            f"\n\nMENU: If the farmer's message is only a greeting or small talk, begin your "
-            f"reply with {GREETING_TAG} and then ask how you can help today, in their language. "
-            f"If it describes a problem or asks a question, do not use {GREETING_TAG}, just answer."
-        )
+    language_note += (
+        f"\n\nMENU: If the farmer's message is ONLY a greeting or small talk, with no question "
+        f"and no problem to deal with, such as a bare \"hello\" sent in the middle of a chat, "
+        f"begin your reply with {GREETING_TAG} and then ask how you can help, in their "
+        f"language, following the GREETING rule above about whether to introduce yourself. "
+        f"This applies every time, not only on a farmer's very first message. If the message "
+        f"describes a problem or asks a question, even a short one, do not use {GREETING_TAG}, "
+        f"just answer it."
+    )
     # Repeated here because older replies in the history may be long or use bullet points.
     language_note += (
         "\n\nSTYLE: 2 to 4 short lines of plain text, no bullets, no em or en dashes, and at "
@@ -912,9 +922,9 @@ def generate_answer(
     answer = answer.replace(GREETING_TAG, "").strip()
     if urgent:
         menu = None  # a vet is being dispatched instead of offering options
-    elif is_greeting and not recently_chatted:
+    elif is_greeting:
         answer = answer or WELCOME_REPLY
-        menu = MAIN_MENU
+        menu = MAIN_MENU  # always show the menu again for a bare greeting, not just first contact
     elif answer.endswith("?"):
         menu = None  # the farmer needs to answer the question, so don't offer options
     else:
